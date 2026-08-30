@@ -10,7 +10,8 @@ It is how work gets done here.
 
 ## 1. The working loop
 
-Development happens one GitHub Issue at a time. For every Issue:
+Development happens one GitHub Issue at a time. The backlog, in dependency
+order, is [`docs/roadmap.md`](docs/roadmap.md). For every Issue:
 
 1. **Read the entire Issue.** Including Context, Technical Notes, Out of Scope
    and Verification. The Out of Scope section is binding.

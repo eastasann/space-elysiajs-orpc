@@ -9,9 +9,11 @@ Hatena Bookmark.
 > balancing, CI, and structured logging with request correlation.
 >
 > The product features (article ingestion, feeds, categories, bookmarks, votes,
-> comments, moderation, search) are **not implemented**. They are tracked as
-> GitHub Issues and picked up one at a time — see
-> [`docs/issue-driven-development.md`](docs/issue-driven-development.md).
+> comments, moderation, search) are **not implemented**. They are tracked as 34
+> GitHub Issues in dependency order — see [`docs/roadmap.md`](docs/roadmap.md)
+> for the backlog and
+> [`docs/issue-driven-development.md`](docs/issue-driven-development.md) for how
+> one is picked up.
 
 ---
 
@@ -196,5 +198,6 @@ instance. See [`docs/architecture.md`](docs/architecture.md#load-balancing).
 ## Contributing
 
 Work is organised as GitHub Issues, one independently reviewable change at a
-time. Read [`AGENTS.md`](AGENTS.md) — it applies to humans too — and
-[`docs/issue-driven-development.md`](docs/issue-driven-development.md).
+time. Read [`AGENTS.md`](AGENTS.md) — it applies to humans too — then
+[`docs/issue-driven-development.md`](docs/issue-driven-development.md), and pick
+the first unblocked Issue from [`docs/roadmap.md`](docs/roadmap.md).

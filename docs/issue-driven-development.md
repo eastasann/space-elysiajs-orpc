@@ -89,8 +89,9 @@ Too small is a real failure too. An Issue that cannot be verified on its own —
 
 ## Picking one up
 
-1. **Choose an unblocked Issue.** Each says what it depends on. Do not start one
-   whose dependencies are open.
+1. **Choose an unblocked Issue** from [`roadmap.md`](roadmap.md), which lists the
+   backlog in dependency order. Each Issue also states its dependencies. Do not
+   start one whose dependencies are open.
 2. **Investigate before planning.** Find the layer, find the nearest existing
    example, read it. `apps/api/src/modules/system/` is the reference shape for
    an API module.
