@@ -1,0 +1,246 @@
+# ---------------------------------------------------------------------------
+# Newsdeck local development environment.
+#
+#   docker compose up -d --build
+#
+# Every value has a working default, so no `.env` file is required to start.
+# Copy `.env.example` to `.env` to override any of them.
+#
+# Exposed to the host (and only these):
+#   127.0.0.1:8080  user web application + /api
+#   127.0.0.1:8081  admin application    + /api
+#
+# PostgreSQL, Redis, the API instances, the worker and the SSR servers are
+# reachable only from inside the compose networks. See docs/architecture.md.
+# ---------------------------------------------------------------------------
+
+x-build: &build
+  context: .
+  dockerfile: infra/docker/Dockerfile
+
+# Connection strings are derived from the PostgreSQL/Valkey service definitions
+# rather than read from `.env`, so changing a password cannot leave the two out
+# of step. `DATABASE_URL` in `.env` is for host-side tooling only.
+x-database-url: &database-url
+  postgres://${POSTGRES_USER:-newsdeck}:${POSTGRES_PASSWORD:-newsdeck_local_password}@postgres:5432/${POSTGRES_DB:-newsdeck}
+
+x-api-environment: &api-environment
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: *database-url
+  DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-10}
+  REDIS_URL: redis://redis:6379
+  API_PORT: 3001
+  AUTH_PROVIDER: ${AUTH_PROVIDER:-local}
+  AUTH_ISSUER: ${AUTH_ISSUER:-newsdeck-local}
+  AUTH_AUDIENCE: ${AUTH_AUDIENCE:-newsdeck}
+  AUTH_LOCAL_SIGNING_KEY: ${AUTH_LOCAL_SIGNING_KEY:-local-development-signing-key-change-me}
+
+x-api-service: &api-service
+  build:
+    <<: *build
+    target: api
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:3001/health']
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 15s
+  networks:
+    - edge
+    - backend
+
+x-frontend-environment: &frontend-environment
+  NODE_ENV: production
+  PORT: 3000
+  # SSR reaches the API through the proxy, so server-rendered pages are load
+  # balanced exactly like browser requests are. `proxy` resolves only inside
+  # the compose network, and 8080 is the port nginx listens on there — the
+  # host-side port mapping is irrelevant between containers.
+  SERVER_API_URL: http://proxy:8080/api
+
+x-frontend-service: &frontend-service
+  restart: unless-stopped
+  healthcheck:
+    # A static file: liveness of the SSR server must not depend on the API.
+    test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:3000/health.txt']
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+  networks:
+    - edge
+
+services:
+  # --- Infrastructure ------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-newsdeck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-newsdeck_local_password}
+      POSTGRES_DB: ${POSTGRES_DB:-newsdeck}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-newsdeck} -d ${POSTGRES_DB:-newsdeck}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend
+
+  redis:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    # Valkey is a BSD-licensed, drop-in Redis replacement; see docs/adr/0003.
+    command: ['valkey-server', '--appendonly', 'yes']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - backend
+
+  # --- Schema --------------------------------------------------------------
+  migrate:
+    build:
+      <<: *build
+      target: migrate
+    restart: 'no'
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # --- API (two instances, behind the proxy) -------------------------------
+  api-1:
+    <<: *api-service
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api-1
+
+  api-2:
+    <<: *api-service
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api-2
+
+  # --- Background worker ---------------------------------------------------
+  worker:
+    build:
+      <<: *build
+      target: worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REDIS_URL: redis://redis:6379
+      WORKER_PORT: 3002
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_HEARTBEAT_INTERVAL_SECONDS: ${WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+      INSTANCE_ID: worker-1
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:3002/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    # Long enough for an in-flight job to finish before the process is killed.
+    stop_grace_period: 30s
+    networks:
+      - backend
+
+  # --- User web application (two instances, behind the proxy) --------------
+  web-1:
+    <<: *frontend-service
+    build:
+      <<: *build
+      target: web
+    environment:
+      <<: *frontend-environment
+      INSTANCE_ID: web-1
+
+  web-2:
+    <<: *frontend-service
+    build:
+      <<: *build
+      target: web
+    environment:
+      <<: *frontend-environment
+      INSTANCE_ID: web-2
+
+  # --- Admin application ---------------------------------------------------
+  admin:
+    <<: *frontend-service
+    build:
+      <<: *build
+      target: admin
+    environment:
+      <<: *frontend-environment
+      INSTANCE_ID: admin-1
+
+  # --- Reverse proxy / load balancer ---------------------------------------
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./infra/proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # Bound to the loopback interface by default. Set PROXY_BIND=0.0.0.0 to
+      # reach the stack from another machine on your network.
+      - '${PROXY_BIND:-127.0.0.1}:${PROXY_WEB_PORT:-8080}:8080'
+      - '${PROXY_BIND:-127.0.0.1}:${PROXY_ADMIN_PORT:-8081}:8081'
+    # nginx resolves upstream names once at start-up, so every upstream must
+    # already be answering before it boots.
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+      web-1:
+        condition: service_healthy
+      web-2:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1:8080/healthz']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - edge
+
+networks:
+  # Everything the proxy can reach: the SSR servers and the API instances.
+  edge:
+    driver: bridge
+  # Stateful services. The proxy is deliberately NOT attached, so PostgreSQL
+  # and Redis are unreachable from the request path except through the API.
+  backend:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:

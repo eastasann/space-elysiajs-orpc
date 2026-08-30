@@ -1,0 +1,26 @@
+{
+  "name": "@newsdeck/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@newsdeck/api-contract": "workspace:*",
+    "@orpc/client": "1.15.0",
+    "@orpc/tanstack-query": "1.15.0"
+  },
+  "peerDependencies": {
+    "@tanstack/query-core": ">=5.80.2"
+  },
+  "devDependencies": {
+    "@tanstack/query-core": "5.102.8",
+    "@newsdeck/logger": "workspace:*"
+  }
+}

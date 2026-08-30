@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Opt-in port exposure for host-side development.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev-ports.yml up -d
+#
+# The default stack keeps PostgreSQL, Redis and the API off the host so that
+# nothing depends on them by accident. Layer this file in when you want to run
+# an application on the host against containerised infrastructure, attach a
+# database client, or run the integration tests.
+# ---------------------------------------------------------------------------
+services:
+  postgres:
+    ports:
+      - '${PROXY_BIND:-127.0.0.1}:5432:5432'
+
+  redis:
+    ports:
+      - '${PROXY_BIND:-127.0.0.1}:6379:6379'
+
+  api-1:
+    ports:
+      - '${PROXY_BIND:-127.0.0.1}:3001:3001'

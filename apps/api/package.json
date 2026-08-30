@@ -1,0 +1,27 @@
+{
+  "name": "@newsdeck/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "1.4.2",
+    "@newsdeck/api-contract": "workspace:*",
+    "@newsdeck/auth": "workspace:*",
+    "@newsdeck/config": "workspace:*",
+    "@newsdeck/db": "workspace:*",
+    "@newsdeck/jobs": "workspace:*",
+    "@newsdeck/logger": "workspace:*",
+    "@orpc/server": "1.15.0",
+    "elysia": "1.4.30",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@orpc/client": "1.15.0"
+  }
+}

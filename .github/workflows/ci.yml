@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: '1.3.11'
+
+jobs:
+  # Formatting, linting and types. Fast, no services required — this is the job
+  # that should fail first when something is obviously wrong.
+  static:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      # `biome check` covers formatting, lint rules and import ordering.
+      - name: Lint and format check
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+  # Unit and integration tests. The integration tests need real PostgreSQL and
+  # Redis; both are provided as services so they are never silently skipped.
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: newsdeck
+          POSTGRES_PASSWORD: newsdeck_ci
+          POSTGRES_DB: newsdeck_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U newsdeck -d newsdeck_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: valkey/valkey:8-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://newsdeck:newsdeck_ci@localhost:5432/newsdeck_test
+      TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun run test
+
+      # A guard against integration coverage quietly turning into no coverage:
+      # these suites skip themselves when the service URLs are unset.
+      - name: Assert integration tests actually ran
+        run: |
+          test -n "$TEST_DATABASE_URL" || { echo 'TEST_DATABASE_URL is unset'; exit 1; }
+          test -n "$TEST_REDIS_URL" || { echo 'TEST_REDIS_URL is unset'; exit 1; }
+
+  # Production builds of the two TanStack Start applications.
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      # The generated route tree is committed so that `typecheck` works without
+      # a build. Fail if a build would change it.
+      - name: Check the committed route trees are current
+        run: git diff --exit-code -- 'apps/*/src/routeTree.gen.ts'
+
+  # The full stack under Docker, exercised through the reverse proxy exactly as
+  # a browser reaches it.
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Start the stack
+        run: docker compose up -d --build --wait
+
+      - name: Verify load balancing across API and web instances
+        run: bun run verify:lb
+
+      - name: Install the browser
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        run: bun run test:e2e
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Tear the stack down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

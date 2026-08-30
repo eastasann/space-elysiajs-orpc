@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/.output
+**/.nitro
+**/.tanstack
+**/.turbo
+**/*.tsbuildinfo
+.git
+.github
+docs
+e2e
+playwright-report
+test-results
+coverage
+**/.env
+**/.env.local
+README.md

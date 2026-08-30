@@ -1,0 +1,27 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "globalDependencies": ["tsconfig.base.json", "biome.json"],
+  "globalEnv": ["NODE_ENV"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".output/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "env": ["TEST_DATABASE_URL", "TEST_REDIS_URL"],
+      "outputs": [],
+      "cache": false
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  },
+  "globalPassThroughEnv": ["E2E_ADMIN_URL", "E2E_WEB_URL", "PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
+}

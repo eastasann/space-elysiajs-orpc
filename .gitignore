@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.output/
+.nitro/
+.tanstack/
+.turbo/
+*.tsbuildinfo
+
+# generated router trees are committed; see docs/development.md
+# (nothing to ignore here)
+
+# environment
+.env
+.env.local
+.env.*.local
+
+# test artifacts
+playwright-report/
+test-results/
+blob-report/
+coverage/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,194 @@
+/*
+ * Shared visual language for the user web app and the admin app.
+ * Plain CSS with custom properties: the bootstrap needs a small, legible
+ * surface, not a styling framework.
+ */
+
+:root {
+  --nd-bg: #0f1115;
+  --nd-surface: #171a21;
+  --nd-surface-raised: #1f232c;
+  --nd-border: #2a2f3a;
+  --nd-text: #e6e9ef;
+  --nd-text-muted: #9aa3b2;
+  --nd-accent: #5b9dff;
+  --nd-ok: #3fb950;
+  --nd-warn: #d29922;
+  --nd-error: #f85149;
+  --nd-radius: 10px;
+  --nd-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --nd-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--nd-bg);
+  color: var(--nd-text);
+  font-family: var(--nd-font);
+  line-height: 1.55;
+}
+
+a {
+  color: var(--nd-accent);
+}
+
+.nd-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.nd-masthead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--nd-border);
+  padding-bottom: 1rem;
+  margin-bottom: 2rem;
+}
+
+.nd-masthead__title {
+  font-size: 1.35rem;
+  margin: 0;
+}
+
+.nd-masthead__tagline {
+  color: var(--nd-text-muted);
+  margin: 0.15rem 0 0;
+  font-size: 0.9rem;
+}
+
+.nd-nav {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.9rem;
+}
+
+.nd-panel {
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: var(--nd-radius);
+  margin-bottom: 1.5rem;
+  overflow: hidden;
+}
+
+.nd-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--nd-border);
+  background: var(--nd-surface-raised);
+}
+
+.nd-panel__title {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.nd-panel__description {
+  margin: 0.2rem 0 0;
+  color: var(--nd-text-muted);
+  font-size: 0.85rem;
+}
+
+.nd-panel__body {
+  padding: 1rem 1.25rem;
+}
+
+.nd-kv {
+  margin: 0;
+  display: grid;
+  gap: 0.4rem 1rem;
+  grid-template-columns: minmax(9rem, max-content) 1fr;
+}
+
+.nd-kv__row {
+  display: contents;
+}
+
+.nd-kv__key {
+  color: var(--nd-text-muted);
+  font-size: 0.85rem;
+}
+
+.nd-kv__value {
+  margin: 0;
+  font-family: var(--nd-mono);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.nd-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid currentcolor;
+}
+
+.nd-badge--ok {
+  color: var(--nd-ok);
+}
+
+.nd-badge--warn {
+  color: var(--nd-warn);
+}
+
+.nd-badge--error {
+  color: var(--nd-error);
+}
+
+.nd-badge--neutral {
+  color: var(--nd-text-muted);
+}
+
+.nd-note {
+  color: var(--nd-text-muted);
+  font-size: 0.85rem;
+}
+
+.nd-button {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--nd-text);
+  background: var(--nd-surface-raised);
+  border: 1px solid var(--nd-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+.nd-button:hover {
+  border-color: var(--nd-accent);
+}
+
+.nd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.nd-table th,
+.nd-table td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--nd-border);
+}
+
+.nd-table th {
+  color: var(--nd-text-muted);
+  font-weight: 600;
+}
+
+.nd-table td {
+  font-family: var(--nd-mono);
+}
