@@ -1,0 +1,21 @@
+{
+  "name": "@newsdeck/local-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local execution plane for the autonomous issue-to-merge loop.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@newsdeck/loop": "workspace:*",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11"
+  }
+}

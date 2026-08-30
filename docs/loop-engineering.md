@@ -8,6 +8,7 @@ describes the same lifecycle when a person drives it. The rules in
 [`AGENTS.md`](../AGENTS.md) apply unchanged; this document adds what happens
 around them.
 
+- [Two planes](#two-planes)
 - [Lifecycle](#lifecycle)
 - [Labels](#labels)
 - [Issue dependencies](#issue-dependencies)
@@ -21,7 +22,42 @@ around them.
 - [Concurrency and its limits](#concurrency-and-its-limits)
 - [Repository configuration](#repository-configuration)
 - [Connecting a coding agent](#connecting-a-coding-agent)
+- [The local execution plane](#the-local-execution-plane)
 - [What is not automated](#what-is-not-automated)
+
+---
+
+## Two planes
+
+This repository separates *deciding* from *doing*.
+
+```
+┌─ control plane ─ GitHub ──────────────┐   ┌─ execution plane ─ your machine ─┐
+│                                       │   │                                  │
+│  issue labels and lifecycle           │   │  tooling/local-runner            │
+│  tooling/loop  (pure decision logic)  │   │  Claude Code — coding session    │
+│  .github/workflows/loop-*.yml         │   │  Claude Code — review session    │
+│  required checks, rulesets            │◀──│  git worktree, verification      │
+│  auto-merge / human approval          │   │  gh: branch, pull request, labels│
+│                                       │──▶│                                  │
+└───────────────────────────────────────┘   └──────────────────────────────────┘
+        authoritative                              no merge authority
+```
+
+The control plane is described in this document. The execution plane — the
+runner that actually writes code — is described in
+[local-agent-runner.md](./local-agent-runner.md).
+
+The boundary is one-way. The execution plane pushes `agent/issue-*` branches,
+opens pull requests, moves lifecycle labels and posts advisory reviews. Whether
+a change may merge is decided here, by required checks GitHub enforces, from a
+policy file the runner cannot alter without triggering the `risk:high` path that
+requires a person. The runner ships no merge call, no force push, and no path
+that edits a ruleset — asserted structurally by a test that scans its own source.
+
+Both planes read the same `.github/loop-policy.json`. The runner classifies risk
+locally so it knows whether to stop for a human; that value is advisory and
+`loop-pr.yml` recomputes it. Two computations, one policy, one authority.
 
 ---
 
@@ -520,6 +556,42 @@ reference, its inputs, and that it opens a pull request before enabling it.
 
 The same applies to `LOOP_REVIEW_PROVIDER` in `loop-pr.yml`.
 
+### Or run the agent locally instead
+
+`loop-agent-dispatch.yml` is not the only way to connect an agent, and it is not
+the one this repository actually uses. The supported path is the **local
+runner**: Claude Code on a developer's own machine, authenticated with their own
+subscription, producing ordinary pull requests that this control plane then
+gates.
+
+```bash
+bun run loop:status
+bun run loop:once --dry-run
+bun run loop:once
+```
+
+Nothing about the control plane changes. The runner arrives at exactly the point
+`loop-agent-dispatch.yml` would have — a pull request with `Closes #N` on an
+`agent/issue-*` branch — and everything after that is identical. See
+[local-agent-runner.md](./local-agent-runner.md).
+
+---
+
+## The local execution plane
+
+| | Control plane (GitHub) | Execution plane (local runner) |
+| --- | --- | --- |
+| Where | GitHub Actions | a developer's machine |
+| Code | `tooling/loop`, `.github/workflows` | `tooling/local-runner` |
+| Decides | risk, review gate, merge | nothing |
+| Does | enforce | implement, verify, review, push |
+| Credentials | `GITHUB_TOKEN`, scoped per job | the developer's own `gh` and Claude Code logins |
+| Can it merge? | yes, through GitHub auto-merge | **no** |
+
+The runner's authority is exactly that of the developer running it, and its
+output is exactly a pull request. If it produces something wrong, the same gates
+that catch a human's mistake catch it.
+
 Everything else works without either: implement an issue by hand, open a pull
 request that says `Closes #N`, and the risk classification, deterministic
 checks, gates, merge policy and next-issue selection all run normally. The only
@@ -532,11 +604,17 @@ a human.
 
 Stated plainly, so nothing here reads as a claim it is not:
 
-- **Agent invocation.** No runner is connected. The boundary is implemented; the
-  runner is not provisioned.
-- **Review agent.** Same. The schema, validation, merging with deterministic
-  findings, and the gate are all implemented and tested; the model is not
-  connected.
+- **Agent invocation from GitHub Actions.** No hosted runner is connected;
+  `loop-agent-dispatch.yml` is a boundary, not a provider. The
+  [local runner](./local-agent-runner.md) is the connected path, and it runs on
+  a developer's machine, not in Actions.
+- **Review agent in the workflow.** `loop-pr.yml` still has no model connected,
+  so the gate's review is the deterministic checks alone and reports `blocked`
+  for the agent portion. The local runner does run a real review agent, but
+  that review is advisory and does not satisfy the workflow's gate.
+- **An end-to-end run.** The local runner has never taken a real issue through
+  to a merged pull request in this repository. Its components are tested against
+  fakes and real git; the whole path has not been exercised.
 - **Repository settings.** Rulesets, required checks and auto-merge must be
   applied by a human. They are printed by `loop-bootstrap.yml`.
 - **Live workflow execution.** The decision logic is covered by 206 tests. The
