@@ -3,6 +3,7 @@ import { branchName, isAgentBranch, slugify } from '../src/branch.ts'
 import { interpretInvocation } from '../src/claude.ts'
 import { filteredEnvironment, run } from '../src/exec.ts'
 import { pushBranch } from '../src/git.ts'
+import { probeGh } from '../src/github.ts'
 import { cap, fence, loadTemplate, render } from '../src/prompts.ts'
 import { redact, redactJson } from '../src/redact.ts'
 import { publishable, renderRunnerComment } from '../src/report.ts'
@@ -222,6 +223,84 @@ describe('published comments', () => {
     expect(comment).not.toContain('ghp_')
     expect(comment).toContain('[redacted:github-token]')
     expect(comment).toContain('It does not merge')
+  })
+})
+
+describe('github readiness', () => {
+  const gh = (
+    responses: Record<string, { code: number; stdout: string; stderr?: string }>,
+  ): Parameters<typeof probeGh>[0] => ({
+    which: () => '/usr/bin/gh',
+    runner: async (_command, args) => {
+      const key = args.join(' ')
+      const match = responses[key] ?? { code: 0, stdout: '' }
+      return {
+        code: match.code,
+        stdout: match.stdout,
+        stderr: match.stderr ?? '',
+        timedOut: false,
+        display: '',
+      }
+    },
+  })
+
+  test('being logged in is not treated as having repository access', async () => {
+    // The exact shape seen in a sandbox whose proxy served `gh api user` but
+    // refused every repository call: authenticated, and useless.
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        'api repos/owner/name --jq .full_name': {
+          code: 1,
+          stdout: '',
+          stderr: 'HTTP 403: GitHub access is not enabled for this session',
+        },
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) {
+      expect(result.reason).toBe('no-repository-access')
+      expect(result.remedy).toContain('cannot read owner/name')
+      expect(result.detail).toContain('403')
+    }
+  })
+
+  test('reports ready only when the repository actually reads back', async () => {
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        'api repos/owner/name --jq .full_name': { code: 0, stdout: 'owner/name\n' },
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(true)
+    if (result.available) {
+      expect(result.account).toBe('someone')
+      expect(result.repository).toBe('owner/name')
+    }
+  })
+
+  test('a rejected credential is not-authenticated, not no-access', async () => {
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 1, stdout: '' },
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) expect(result.reason).toBe('not-authenticated')
+  })
+
+  test('a missing binary is reported before anything is run', async () => {
+    const result = await probeGh({ which: () => null, repo: 'owner/name' })
+    expect(result.available).toBe(false)
+    if (!result.available) expect(result.reason).toBe('not-installed')
   })
 })
 

@@ -127,7 +127,7 @@ async function loadPolicy(repository: string) {
 
 async function status(repository: string, repo: string, lockPath: string): Promise<number> {
   const config = loadConfig()
-  const checks = await preflight({ repository, lockPath })
+  const checks = await preflight({ repository, lockPath, repo })
 
   log(`Repository    ${repo}`)
   log(`Branch        ${await currentBranch(repository)}`)
@@ -198,7 +198,7 @@ async function main(): Promise<number> {
 
   if (parsed.command === 'status') return status(repository, repo, lockPath)
 
-  const checks = await preflight({ repository, lockPath })
+  const checks = await preflight({ repository, lockPath, repo })
   if (!checks.ok) {
     log(formatPreflight(checks))
     log('')

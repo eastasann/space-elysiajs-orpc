@@ -15,15 +15,31 @@ import { redact } from './redact.ts'
  */
 
 export type GhAvailability =
-  | { available: false; reason: 'not-installed' | 'not-authenticated'; remedy: string }
-  | { available: true; account: string }
+  | {
+      available: false
+      reason: 'not-installed' | 'not-authenticated' | 'no-repository-access'
+      remedy: string
+      detail?: string
+    }
+  | { available: true; account: string; repository: string }
 
 export interface GhOptions {
   runner?: typeof run
   which?: (command: string) => string | null
   cwd?: string
+  /** `owner/name`. Access to it is verified, not assumed. */
+  repo?: string
 }
 
+/**
+ * Establish that `gh` can actually do this repository's work.
+ *
+ * Being logged in is not the same as being able to read the repository, and the
+ * difference is expensive: a probe that stops at `gh auth status` reports ready,
+ * the runner claims an issue, and the first repository call fails with the issue
+ * already labelled `agent:in-progress` and a worktree half built. So the probe
+ * makes a real repository call and treats anything but success as not ready.
+ */
 export async function probeGh(options: GhOptions = {}): Promise<GhAvailability> {
   const exec = options.runner ?? run
   const which = options.which ?? resolveOnPath
@@ -54,8 +70,46 @@ export async function probeGh(options: GhOptions = {}): Promise<GhAvailability> 
     cwd: options.cwd,
     envProfile: 'github',
   })
+  if (account.code !== 0) {
+    return {
+      available: false,
+      reason: 'not-authenticated',
+      remedy: 'Run `gh auth login`; the credential `gh` holds was rejected.',
+      detail: redact(account.stderr.trim()).slice(0, 500),
+    }
+  }
 
-  return { available: true, account: account.stdout.trim() || 'unknown' }
+  if (options.repo === undefined) {
+    return {
+      available: true,
+      account: account.stdout.trim() || 'unknown',
+      repository: '(unchecked)',
+    }
+  }
+
+  // The narrowest call that proves read access, and cheap enough to make every
+  // run. Issue and pull request permissions are not separately probed — GitHub
+  // does not expose them without attempting a write — so a later failure is
+  // still possible; this catches the common case of no access at all.
+  const repository = await exec('gh', ['api', `repos/${options.repo}`, '--jq', '.full_name'], {
+    timeoutMs: 30_000,
+    cwd: options.cwd,
+    envProfile: 'github',
+  })
+  if (repository.code !== 0 || repository.stdout.trim() === '') {
+    return {
+      available: false,
+      reason: 'no-repository-access',
+      remedy: `\`gh\` is authenticated as ${account.stdout.trim() || 'an unknown account'} but cannot read ${options.repo}. Check the account has access, and that any proxy or policy in front of the GitHub API allows repository calls.`,
+      detail: redact(repository.stderr.trim() || repository.stdout.trim()).slice(0, 500),
+    }
+  }
+
+  return {
+    available: true,
+    account: account.stdout.trim() || 'unknown',
+    repository: repository.stdout.trim(),
+  }
 }
 
 export const issueSchema = z.object({

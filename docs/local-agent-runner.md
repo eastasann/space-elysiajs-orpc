@@ -110,8 +110,25 @@ claiming an issue and tells you which command to run.
 ### GitHub
 
 The runner uses the `gh` CLI you have already authenticated. It never handles a
-token itself, never prints one, and never asks for a personal access token. It
-verifies `gh auth status` before doing anything, and stops if it fails.
+token itself, never prints one, and never asks for a personal access token.
+
+Readiness is checked in three steps, because being logged in is not the same as
+being able to work on this repository:
+
+1. `gh` is on `PATH`.
+2. `gh auth status` and `gh api user` succeed — a credential exists and is
+   accepted.
+3. `gh api repos/{owner}/{name}` succeeds — that credential can actually read
+   **this** repository.
+
+Step 3 exists because step 2 passing on its own is a real failure mode: a
+sandbox, a proxy, or an org policy can serve `gh api user` and refuse every
+repository call. Without it the runner reports ready, claims an issue, and only
+then discovers it cannot open a pull request — leaving the issue labelled
+`agent:in-progress` and a worktree half built. Issue and pull request *write*
+permissions are not separately probed, because GitHub does not expose them
+without attempting a write, so a later permission failure is still possible;
+what this catches is the common case of no access at all.
 
 ## Commands
 
