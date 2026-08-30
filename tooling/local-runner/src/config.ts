@@ -36,6 +36,20 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   return runnerConfigSchema.parse(source)
 }
 
+/**
+ * Dependencies, installed into a fresh worktree before anything runs.
+ *
+ * `git worktree add` produces a checkout with no `node_modules`, so without
+ * this every verification step fails on the first run for a reason that has
+ * nothing to do with the change. `--frozen-lockfile` because a coding agent
+ * must not silently resolve a different dependency tree than CI will.
+ */
+export const INSTALL_STEP = {
+  name: 'install',
+  command: 'bun',
+  args: ['install', '--frozen-lockfile'],
+} as const
+
 /** Verification commands the runner runs itself, in order, before opening a PR. */
 export const VERIFICATION_STEPS = [
   { name: 'lint', command: 'bun', args: ['run', 'lint'] },

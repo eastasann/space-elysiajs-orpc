@@ -182,6 +182,102 @@ describe('C — the coding agent succeeds', () => {
   })
 })
 
+describe('C2 — a fresh worktree gets its dependencies', () => {
+  test('installs before anything is verified, and blocks when that fails', async () => {
+    const sandbox = await createSandbox()
+    try {
+      const gh = fakeGh({ issues: [issueFixture(40, 'Needs deps')] })
+      const order: string[] = []
+      const coding = scriptedCodingAgent([
+        (task) => {
+          order.push('code')
+          return write(task, 'a.ts', 'export const j = 10\n')
+        },
+      ])
+
+      const deps = testDeps({
+        repository: sandbox.repository,
+        gh,
+        coding,
+        review: scriptedReviewAgent([approvingReview()]),
+        installer: async (command, args) => {
+          order.push(`${command} ${args.join(' ')}`)
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'lockfile is out of date',
+            timedOut: false,
+            display: '',
+          }
+        },
+        verifier: async () => {
+          order.push('verify')
+          return passingVerification()
+        },
+      })
+
+      const outcome = await workIssue(deps, {
+        number: 40,
+        title: 'Needs deps',
+        state: 'open',
+        labels: ['agent:ready'],
+        body: 'Install them.',
+      })
+
+      // A failed install stops the run before the agent is even asked to work,
+      // rather than letting every check fail for an unrelated reason.
+      expect(outcome.status).toBe('blocked')
+      expect(outcome.detail).toContain('lockfile is out of date')
+      expect(order).toEqual(['bun install --frozen-lockfile'])
+      expect(coding.rounds).toHaveLength(0)
+      expect(gh.labelsOf(40)).toEqual(['agent:blocked'])
+    } finally {
+      await sandbox.cleanup()
+    }
+  })
+
+  test('installs once, before the first coding round', async () => {
+    const sandbox = await createSandbox()
+    try {
+      const gh = fakeGh({ issues: [issueFixture(41, 'Order matters')] })
+      const order: string[] = []
+      const coding = scriptedCodingAgent([
+        (task) => {
+          order.push('code')
+          return write(task, 'b.ts', 'export const k = 11\n')
+        },
+      ])
+
+      const deps = testDeps({
+        repository: sandbox.repository,
+        gh,
+        coding,
+        review: scriptedReviewAgent([approvingReview()]),
+        installer: async (command, args) => {
+          order.push(`${command} ${args.join(' ')}`)
+          return { code: 0, stdout: '', stderr: '', timedOut: false, display: '' }
+        },
+        verifier: async () => {
+          order.push('verify')
+          return passingVerification()
+        },
+      })
+
+      await workIssue(deps, {
+        number: 41,
+        title: 'Order matters',
+        state: 'open',
+        labels: ['agent:ready'],
+        body: 'Order it.',
+      })
+
+      expect(order).toEqual(['bun install --frozen-lockfile', 'code', 'verify'])
+    } finally {
+      await sandbox.cleanup()
+    }
+  })
+})
+
 describe('D — verification fails', () => {
   test('runs a bounded fix loop and blocks when it is spent', async () => {
     const sandbox = await createSandbox()

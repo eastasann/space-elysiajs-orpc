@@ -275,6 +275,8 @@ export function testDeps(overrides: DepsOverrides): RunnerDeps {
     log: () => {},
     createLog: async () => nullLog(),
     verifier: async () => passingVerification(),
+    // The suite never installs dependencies into its temporary repositories.
+    installer: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false, display: '' }),
     ...overrides,
   }
 }

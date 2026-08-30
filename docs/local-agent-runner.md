@@ -153,7 +153,11 @@ Takes **one** issue through the local coding phase:
    same policy the `loop-next-issue` workflow uses. The runner does not have its
    own eligibility rules.
 5. Claim it: `agent:ready` → `agent:in-progress`.
-6. Create `../.loop-worktrees/issue-N` on `agent/issue-N-short-description`.
+6. Create `../.loop-worktrees/issue-N` on `agent/issue-N-short-description`, and
+   run `bun install --frozen-lockfile` in it. A fresh worktree has no
+   `node_modules`, so without this every verification step fails for a reason
+   that has nothing to do with the change. `--frozen-lockfile` because an agent
+   must not quietly resolve a different dependency tree than CI will.
 7. Round loop, bounded by `LOCAL_AGENT_MAX_FIX_ROUNDS`:
    - a fresh Claude Code coding session,
    - the repository's own `lint`, `typecheck`, `test`, `build`,

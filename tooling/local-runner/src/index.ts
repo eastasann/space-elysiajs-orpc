@@ -35,6 +35,7 @@ export {
   REVIEW_JSON_SCHEMA,
 } from './claude-agent.ts'
 export {
+  INSTALL_STEP,
   loadConfig,
   type RunnerConfig,
   runnerConfigSchema,

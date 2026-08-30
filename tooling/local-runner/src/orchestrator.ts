@@ -12,7 +12,8 @@ import {
 } from '@newsdeck/loop'
 import type { CodingAgent, ReviewAgent } from './agent.ts'
 import { branchName, worktreeName } from './branch.ts'
-import type { RunnerConfig } from './config.ts'
+import { INSTALL_STEP, type RunnerConfig } from './config.ts'
+import { run } from './exec.ts'
 import {
   changedFiles,
   commitAll,
@@ -78,6 +79,8 @@ export interface RunnerDeps {
   verifier?: typeof verify
   /** Overridden in tests so the suite writes no log files. */
   createLog?: (root: string, issue: number) => Promise<ExecutionLog>
+  /** Overridden in tests so the suite never installs dependencies. */
+  installer?: typeof run
 }
 
 export interface IssueOutcome {
@@ -318,6 +321,19 @@ export async function workIssue(
     await ensureWorktree({ repository: deps.repository, path: worktree, branch, base })
   } catch (error) {
     return fail(`Could not prepare the worktree: ${messageOf(error)}`)
+  }
+
+  // A fresh worktree has no `node_modules`. Without this every verification
+  // step fails for a reason that has nothing to do with the change.
+  deps.log(`#${issue.number}: installing dependencies`)
+  const installed = await (deps.installer ?? run)(INSTALL_STEP.command, [...INSTALL_STEP.args], {
+    cwd: worktree,
+    timeoutMs: 15 * 60 * 1000,
+  })
+  if (installed.code !== 0) {
+    return fail(
+      `\`bun install --frozen-lockfile\` failed in the worktree:\n\n${installed.stderr.trim().slice(-2000)}`,
+    )
   }
 
   const runVerify = deps.verifier ?? verify
