@@ -1,0 +1,105 @@
+name: Loop - bootstrap repository configuration
+
+# Creates the loop's labels with their colours and descriptions, then prints the
+# repository settings that a human still has to apply.
+#
+# Labels can be created from a workflow; rulesets, required status checks and
+# the "Allow auto-merge" setting cannot be, because GITHUB_TOKEN has no
+# administration scope. That split is deliberate — a workflow able to rewrite
+# its own merge protections would defeat the point of having them.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  labels:
+    name: Create labels and report manual steps
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # creating and updating labels
+
+    steps:
+      - name: Create or update the loop labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              ['agent:ready', '0e8a16', 'Vetted by a human; the coding agent may pick this up'],
+              ['agent:in-progress', 'fbca04', 'Claimed by the coding agent'],
+              ['agent:review', '1d76db', 'A pull request is open and under automated review'],
+              ['agent:blocked', 'b60205', 'Automation stopped; a human is needed'],
+              ['risk:low', 'c2e0c6', 'Documentation and low-consequence changes; may auto-merge'],
+              ['risk:medium', 'fef2c0', 'Application and library changes; may auto-merge'],
+              ['risk:high', 'e99695', 'Security, infrastructure or architecture; human approval required'],
+            ]
+
+            for (const [name, color, description] of labels) {
+              try {
+                await github.rest.issues.updateLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color,
+                  description,
+                })
+                core.info(`updated ${name}`)
+              } catch (error) {
+                if (error.status !== 404) throw error
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color,
+                  description,
+                })
+                core.info(`created ${name}`)
+              }
+            }
+
+      - name: Report the settings a human must apply
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const required = (process.env.LOOP_REQUIRED_CHECKS ?? 'Lint and types,Tests,Build,End-to-end')
+              .split(',')
+              .map((name) => `\`${name.trim()}\``)
+              .join(', ')
+
+            core.summary
+              .addHeading('Manual repository configuration')
+              .addRaw(
+                [
+                  '',
+                  'Labels are now configured. The following cannot be set from a workflow,',
+                  'because `GITHUB_TOKEN` has no administration scope — which is the point:',
+                  'automation must not be able to weaken its own merge protections.',
+                  '',
+                  '**1. Settings -> General -> Pull Requests**',
+                  '',
+                  '- Enable **Allow auto-merge**. Without it the gate can decide to merge but cannot act.',
+                  '- Enable **Allow squash merging** and set it as the default.',
+                  '',
+                  '**2. Settings -> Rules -> Rulesets**, targeting the default branch:',
+                  '',
+                  '- Restrict deletions, block force pushes.',
+                  '- Require a pull request before merging.',
+                  '- Require status checks to pass, selecting:',
+                  `  ${required}, \`loop/risk-gate\`, \`loop/review-gate\`.`,
+                  '- Require branches to be up to date before merging.',
+                  '- Do **not** require an approving review in the ruleset: `loop/risk-gate`',
+                  '  is what demands a human, and only for high-risk changes. Requiring an',
+                  '  approval globally would disable automatic merging entirely.',
+                  '',
+                  '**3. Optional variables** (Settings -> Secrets and variables -> Actions):',
+                  '',
+                  '- `LOOP_REVIEW_PROVIDER` - enables the review agent. Until it is set, every',
+                  '  pull request is reported as `blocked` and needs a human.',
+                  '- `LOOP_AGENT_PROVIDER` - enables the coding agent runner.',
+                  '- `LOOP_REQUIRED_CHECKS` - overrides the required check list above.',
+                  '',
+                  'See `docs/loop-engineering.md` for the full description.',
+                ].join('\n'),
+              )
+              .write()

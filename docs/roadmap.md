@@ -7,6 +7,12 @@ see [`issue-driven-development.md`](issue-driven-development.md).
 Work top to bottom. An Issue names what it depends on; do not start one whose
 dependencies are open.
 
+Issues labelled `agent:ready` are eligible for the autonomous loop, which reads
+the same dependency graph from
+[`.github/loop-dependencies.json`](../.github/loop-dependencies.json) and from
+each Issue's own `Depends on` block. See
+[`loop-engineering.md`](loop-engineering.md).
+
 ## Milestone 0 — Platform foundation
 
 Built and verified in the bootstrap: the monorepo, the Docker development

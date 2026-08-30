@@ -17,6 +17,9 @@ dist/
 .env.local
 .env.*.local
 
+# autonomous loop scratch output
+.loop/
+
 # test artifacts
 playwright-report/
 test-results/

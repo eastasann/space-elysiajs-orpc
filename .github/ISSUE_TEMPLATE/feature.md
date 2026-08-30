@@ -16,6 +16,19 @@ assignees: ''
 <!-- Why is this required now? What depends on it? Link the Issues this builds
      on and the Issues that are blocked by it. -->
 
+## Depends on
+
+<!-- Issues that must be CLOSED before this one can start. The autonomous loop
+     reads this block, so keep the format:
+
+       - #12
+       - #13
+
+     Write `none` when nothing blocks it — that is a statement, not an omission,
+     and it is what tells the loop this Issue is ready to run. -->
+
+none
+
 ## Acceptance Criteria
 
 <!-- Observable, checkable statements. Each one should be something a reviewer

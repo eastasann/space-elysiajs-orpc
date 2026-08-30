@@ -1,0 +1,89 @@
+{
+  "$comment": [
+    "Policy for the autonomous issue-to-merge loop. See docs/loop-engineering.md.",
+    "",
+    "This file is the single source of truth for risk classification and retry",
+    "limits. It is deliberately data, not code: a reviewer can audit the whole",
+    "merge policy by reading one file. It lives under .github/, which is itself",
+    "classified high risk, so changing the policy always requires human approval."
+  ],
+  "retry": {
+    "maxReviewAttempts": 3
+  },
+  "risk": {
+    "default": "low",
+    "$comment": [
+      "Every changed path is matched against every rule; the HIGHEST matching",
+      "risk wins. Matching upward rather than by specificity means a new file",
+      "under a sensitive directory is protected by default, and a mistake in a",
+      "pattern fails safe."
+    ],
+    "paths": [
+      {
+        "risk": "high",
+        "reason": "repository automation, CI, and merge policy",
+        "patterns": [".github/**", "tooling/loop/**"]
+      },
+      {
+        "risk": "high",
+        "reason": "infrastructure with cross-service blast radius",
+        "patterns": ["infra/**", "docker-compose*.yml", ".dockerignore"]
+      },
+      {
+        "risk": "high",
+        "reason": "authentication and authorization architecture",
+        "patterns": ["packages/auth/**", "apps/api/src/rpc/identity.ts"]
+      },
+      {
+        "risk": "high",
+        "reason": "architecture invariants and agent instructions",
+        "patterns": ["AGENTS.md", "docs/architecture.md", "docs/adr/**", "docs/loop-engineering.md"]
+      },
+      {
+        "risk": "high",
+        "reason": "environment and secret handling",
+        "patterns": [".env.example", "**/.env*"]
+      },
+      {
+        "risk": "medium",
+        "reason": "application and shared library code",
+        "patterns": ["apps/**", "packages/**", "e2e/**", "scripts/**", "tooling/**"]
+      },
+      {
+        "risk": "medium",
+        "reason": "workspace and toolchain configuration",
+        "patterns": [
+          "package.json",
+          "*/package.json",
+          "*/*/package.json",
+          "bun.lock",
+          "turbo.json",
+          "biome.json",
+          "tsconfig.base.json"
+        ]
+      },
+      {
+        "risk": "low",
+        "reason": "documentation",
+        "patterns": ["docs/**", "README.md", "*.md"]
+      }
+    ],
+    "escalations": {
+      "$comment": [
+        "Deterministic conditions that raise risk regardless of path. Each is",
+        "computed from the diff, never from model judgement."
+      ],
+      "maxChangedFiles": 40,
+      "maxDeletedLines": 600,
+      "destructiveMigrationGlobs": ["packages/db/drizzle/**/*.sql"],
+      "publicContractGlobs": ["packages/api-contract/src/**"]
+    }
+  },
+  "review": {
+    "$comment": [
+      "Findings at or above this severity block an automatic merge. Lower",
+      "severities are reported but do not hold the PR."
+    ],
+    "blockingSeverity": "high"
+  }
+}

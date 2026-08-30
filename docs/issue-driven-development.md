@@ -18,6 +18,8 @@ Issue
 
 [`AGENTS.md`](../AGENTS.md) is the operating manual for each step. This document
 explains how the Issues themselves are shaped.
+[`loop-engineering.md`](loop-engineering.md) describes what runs that lifecycle
+automatically, and where it stops for a human.
 
 ---
 

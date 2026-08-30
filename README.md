@@ -98,6 +98,8 @@ packages/
 infra/
   docker/     One multi-stage Dockerfile, four runtime targets.
   proxy/      nginx reverse proxy and load balancer.
+tooling/
+  loop/       Decision logic for the autonomous issue-to-merge loop.
 e2e/          Playwright tests against the running stack.
 docs/         Architecture, development, workflow, ADRs.
 ```
@@ -201,3 +203,9 @@ Work is organised as GitHub Issues, one independently reviewable change at a
 time. Read [`AGENTS.md`](AGENTS.md) — it applies to humans too — then
 [`docs/issue-driven-development.md`](docs/issue-driven-development.md), and pick
 the first unblocked Issue from [`docs/roadmap.md`](docs/roadmap.md).
+
+Issues labelled `agent:ready` are worked by an autonomous loop: a coding agent
+implements them, an automated review and a deterministic risk gate decide whether
+the result may merge, and anything touching security, infrastructure or
+architecture waits for a human. See
+[`docs/loop-engineering.md`](docs/loop-engineering.md).

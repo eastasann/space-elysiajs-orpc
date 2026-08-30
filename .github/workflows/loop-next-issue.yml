@@ -1,0 +1,151 @@
+name: Loop - next issue
+
+# After a merge, close out the issue that shipped and pick the next one.
+#
+# Triggered by a push to the default branch rather than by `pull_request:
+# closed`, so it always runs from trusted default-branch code with no pull
+# request context in scope.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dispatch_agent:
+        description: 'Ask the coding agent to start the selected issue'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  # Repository-wide, and never cancelled: two selection runs must not race for
+  # the same issue. This is the primary defence against double-claiming.
+  group: loop-next-issue
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.3.11'
+  LOOP_OUTPUT_DIR: .loop
+
+jobs:
+  select:
+    name: Select the next issue
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # lifecycle labels
+      actions: write # dispatch the coding agent workflow
+      pull-requests: read
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Close out the merged issue
+        if: github.event_name == 'push'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+
+            // The pull request this push came from, if any.
+            const { data: pulls } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: context.sha,
+            })
+            const merged = pulls.find((pr) => pr.merged_at !== null)
+            if (merged === undefined) {
+              core.info('This push did not come from a merged pull request.')
+              return
+            }
+
+            const closes = /\b(?:closes|fixes|resolves)\s+#(\d+)\b/i.exec(merged.body ?? '')
+            if (closes === null) {
+              core.info(`Pull request #${merged.number} declares no closing issue.`)
+              return
+            }
+
+            const issue_number = Number(closes[1])
+            // GitHub closes the issue itself when the pull request declares it.
+            // All that is left is to clear the loop's own lifecycle labels.
+            for (const label of ['agent:ready', 'agent:in-progress', 'agent:review', 'agent:blocked']) {
+              await github.rest.issues
+                .removeLabel({ owner, repo, issue_number, name: label })
+                .catch(() => {})
+            }
+            core.notice(`Cleared loop labels on #${issue_number} (shipped by #${merged.number}).`)
+
+      - name: Read the backlog
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs')
+            fs.mkdirSync(process.env.LOOP_OUTPUT_DIR, { recursive: true })
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            })
+
+            const summaries = issues
+              // Pull requests come back from this endpoint too; they are not backlog.
+              .filter((issue) => issue.pull_request === undefined)
+              .map((issue) => ({
+                number: issue.number,
+                title: issue.title,
+                state: issue.state,
+                labels: issue.labels.map((l) => (typeof l === 'string' ? l : l.name ?? '')),
+                body: issue.body ?? null,
+              }))
+
+            fs.writeFileSync(
+              `${process.env.LOOP_OUTPUT_DIR}/issues.json`,
+              JSON.stringify(summaries, null, 2),
+            )
+
+      - name: Select
+        id: select
+        env:
+          LOOP_ISSUES: .loop/issues.json
+        run: bun tooling/loop/bin/select-issue.ts
+
+      - name: Write the job summary
+        run: cat "$LOOP_OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch the coding agent
+        if: steps.select.outputs.has_selection == 'true' && inputs.dispatch_agent
+        uses: actions/github-script@v7
+        env:
+          SELECTED: ${{ steps.select.outputs.selected }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'loop-agent-dispatch.yml',
+              ref: context.payload.repository.default_branch,
+              inputs: { mode: 'implement', issue: process.env.SELECTED },
+            })
+            core.notice(`Dispatched the coding agent for issue #${process.env.SELECTED}.`)
+
+      - name: Report that the loop has nothing to do
+        if: steps.select.outputs.has_selection != 'true'
+        env:
+          STOP_REASON: ${{ steps.select.outputs.stop_reason }}
+        run: |
+          # A stop is a normal outcome, not a failure — but it must be legible.
+          echo "::notice title=Loop idle::${STOP_REASON}"

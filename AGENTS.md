@@ -11,7 +11,9 @@ It is how work gets done here.
 ## 1. The working loop
 
 Development happens one GitHub Issue at a time. The backlog, in dependency
-order, is [`docs/roadmap.md`](docs/roadmap.md). For every Issue:
+order, is [`docs/roadmap.md`](docs/roadmap.md). When the work is driven by the
+autonomous loop, [`docs/loop-engineering.md`](docs/loop-engineering.md) describes
+what happens around these steps — §9 below is the short version. For every Issue:
 
 1. **Read the entire Issue.** Including Context, Technical Notes, Out of Scope
    and Verification. The Out of Scope section is binding.
@@ -79,6 +81,8 @@ packages/
 infra/
   docker/      One multi-stage Dockerfile, four runtime targets
   proxy/       nginx configuration (reverse proxy + load balancer)
+tooling/
+  loop/        Decision logic for the autonomous issue-to-merge loop
 e2e/           Playwright tests against the running Docker stack
 docs/          Architecture, development, workflow, ADRs
 ```
@@ -202,9 +206,74 @@ bun run test:e2e    # Playwright, through the proxy
 `apps/api` and `apps/worker` have no build step — Bun runs TypeScript directly,
 so `bun run typecheck` is their compile-time gate.
 
+Changing anything under `tooling/loop/`, `.github/workflows/` or
+`.github/loop-policy.json` changes the merge policy. `bun run test` covers it,
+including a security lint that fails the build on an unsafe workflow — read
+[`docs/loop-engineering.md`](docs/loop-engineering.md) before editing any of it.
+
 ---
 
-## 7. Self-review checklist
+## 7. Working inside the autonomous loop
+
+When an Issue is worked by the loop rather than by hand, these rules apply on
+top of §1. Full detail in [`docs/loop-engineering.md`](docs/loop-engineering.md).
+
+### Issue lifecycle
+
+`agent:ready` → `agent:in-progress` → `agent:review` → merged, or `agent:blocked`.
+
+Only pick up an Issue labelled **`agent:ready`**. That label is a human saying
+the Issue is fit for an agent; its absence is not an oversight to route around.
+Never start one labelled `agent:in-progress` or `agent:blocked`, and never start
+one whose declared dependencies are still open.
+
+Declare dependencies in the Issue body so the loop can read them:
+
+```markdown
+## Depends on
+
+- #12
+```
+
+### Pull requests
+
+Reference the Issue with `Closes #N` in the body — the loop reads that line to
+link the two, to inherit the Issue's risk label, and to close things out on
+merge.
+
+### Risk and the human gate
+
+Risk is computed from the diff, the labels and `.github/loop-policy.json`. It is
+never negotiable from inside a change:
+
+- A `risk:` label can only **escalate**. Labelling a workflow change `risk:low`
+  does not make it low.
+- Touching `.github/**`, `tooling/loop/**`, `infra/**`, `packages/auth/**`,
+  `AGENTS.md`, `docs/architecture.md`, `docs/adr/**` or `.env.example` makes a
+  change high risk, which requires human approval before merge.
+- Keep such changes in their own Issue. Folding a one-line workflow tweak into a
+  feature change sends the whole change to the human gate.
+
+### Automated review and the fix loop
+
+A review agent and six deterministic checks evaluate every pull request against
+the Issue's Acceptance Criteria and Out of Scope sections, and against §4 of
+this document. Both emit findings; anything at `high` or above blocks a merge.
+
+When the loop returns `request_changes`, address **every** finding — or explain
+in the pull request why one is wrong. The retry limit is **3 review rounds**. On
+the fourth the loop stops, the Issue gets `agent:blocked`, and a human takes
+over. Do not spend attempts on partial fixes: re-read the findings, fix them
+together, push once.
+
+Do not attempt to influence the gate: do not edit the loop's sticky comment,
+`.github/loop-policy.json`, or the gate check runs as part of a feature change.
+A change that needs the policy relaxed is an architectural decision — stop and
+say so (§2).
+
+---
+
+## 8. Self-review checklist
 
 Read your own diff before opening a PR and look specifically for:
 
@@ -220,10 +289,13 @@ Read your own diff before opening a PR and look specifically for:
 - [ ] dead code, unused exports, leftover debugging
 - [ ] a placeholder described as finished
 - [ ] an important decision left undocumented
+- [ ] a workflow that grants more permission than it uses, or interpolates an
+      expression into a shell script
+- [ ] a change that quietly widens what may merge without a human
 
 ---
 
-## 8. Pull requests
+## 9. Pull requests
 
 Use `.github/pull_request_template.md`. Reference the Issue with `Closes #N`.
 

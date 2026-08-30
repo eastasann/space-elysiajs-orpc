@@ -1,0 +1,441 @@
+name: Loop - pull request gate
+
+# Classifies risk, runs the review agent, and decides whether a pull request may
+# merge. See docs/loop-engineering.md.
+#
+# SECURITY MODEL
+#
+# This workflow needs write access, so it must never execute pull request code.
+# Two properties keep that true:
+#
+#   1. It is triggered by `workflow_run` (after CI finishes), by
+#      `pull_request_review`, and by manual dispatch. It is NOT triggered by
+#      `pull_request_target`, and it never checks out the pull request's head.
+#      `actions/checkout` here takes the default branch, which is trusted.
+#   2. Nothing derived from the pull request is interpolated into a shell
+#      command. Untrusted values reach `bun` only through files and through
+#      `actions/github-script` variables, never through `${{ }}` inside `run:`.
+#
+# A pull request from a fork is evaluated but never merged automatically; the
+# gate reports `human_approval_required` for it.
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+  pull_request_review:
+    types: [submitted, dismissed]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: 'Pull request number to re-evaluate'
+        required: true
+        type: number
+
+# Default to no access; each job asks for exactly what it needs.
+permissions: {}
+
+concurrency:
+  # One evaluation at a time per pull request. Not cancelled in progress: a
+  # half-applied gate would leave check runs contradicting each other.
+  group: >-
+    loop-pr-${{
+      github.event.workflow_run.head_sha
+      || github.event.pull_request.number
+      || inputs.pull_request
+    }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.3.11'
+  LOOP_OUTPUT_DIR: .loop
+  # Checks that must succeed before an automatic merge. Keep in step with the
+  # job names in ci.yml and with the repository ruleset.
+  LOOP_REQUIRED_CHECKS: ${{ vars.LOOP_REQUIRED_CHECKS || 'Lint and types,Tests,Build,End-to-end' }}
+
+jobs:
+  gate:
+    name: Loop gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout the trusted default branch
+      pull-requests: write # sticky comment, labels, auto-merge
+      issues: write # lifecycle labels on the linked issue
+      checks: write # publish loop/risk-gate and loop/review-gate
+      actions: read # read the triggering CI run
+    steps:
+      - name: Resolve the pull request
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const event = context.eventName
+
+            let number = null
+            if (event === 'workflow_dispatch') {
+              number = Number(context.payload.inputs.pull_request)
+            } else if (event === 'pull_request_review') {
+              number = context.payload.pull_request.number
+            } else {
+              // `workflow_run.pull_requests` is empty for forks, so resolve by
+              // head SHA instead of trusting the payload to contain it.
+              const sha = context.payload.workflow_run.head_sha
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: sha,
+              })
+              const open = data.find((pr) => pr.state === 'open')
+              number = open?.number ?? null
+            }
+
+            if (number === null || Number.isNaN(number)) {
+              core.info('No open pull request for this event; nothing to gate.')
+              core.setOutput('found', 'false')
+              return
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: number,
+            })
+
+            if (pr.state !== 'open') {
+              core.info(`Pull request #${number} is ${pr.state}; nothing to gate.`)
+              core.setOutput('found', 'false')
+              return
+            }
+
+            core.setOutput('found', 'true')
+            core.setOutput('number', String(number))
+            core.setOutput('head_sha', pr.head.sha)
+
+      - name: Check out the default branch
+        if: steps.resolve.outputs.found == 'true'
+        uses: actions/checkout@v4
+        with:
+          # Pinned, not defaulted. Some pull-request-scoped events set
+          # GITHUB_REF to the merge ref, which would check out untrusted code
+          # into a job holding write permissions. The gate therefore always runs
+          # the default branch's logic, and a pull request cannot alter the gate
+          # that judges it. The diff is fetched through the API instead.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Bun
+        if: steps.resolve.outputs.found == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        if: steps.resolve.outputs.found == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Gather evaluation context
+        if: steps.resolve.outputs.found == 'true'
+        uses: actions/github-script@v7
+        env:
+          PULL_NUMBER: ${{ steps.resolve.outputs.number }}
+        with:
+          script: |
+            const fs = require('node:fs')
+            const path = require('node:path')
+            const outputDir = process.env.LOOP_OUTPUT_DIR
+            fs.mkdirSync(outputDir, { recursive: true })
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const pull_number = Number(process.env.PULL_NUMBER)
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number })
+
+            // The diff, fetched rather than checked out. Nothing from the pull
+            // request is ever executed by this workflow.
+            const diff = await github.rest.pulls.get({
+              owner, repo, pull_number,
+              mediaType: { format: 'diff' },
+            })
+            fs.writeFileSync(path.join(outputDir, 'pr.diff'), String(diff.data))
+            fs.writeFileSync(path.join(outputDir, 'pr-body.md'), pr.body ?? '')
+
+            // Check runs and commit statuses reported on the head commit.
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner, repo, ref: pr.head.sha, per_page: 100,
+            })
+            const checks = checkRuns.check_runs.map((run) => ({
+              name: run.name,
+              conclusion: run.status === 'completed' ? (run.conclusion ?? 'neutral') : 'pending',
+            }))
+
+            // Approvals from humans only. A bot approval, or the author's own,
+            // must not satisfy the human gate.
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner, repo, pull_number, per_page: 100,
+            })
+            const latestByUser = new Map()
+            for (const review of reviews) {
+              if (review.user === null) continue
+              latestByUser.set(review.user.login, review)
+            }
+            const humanApprovals = [...latestByUser.values()].filter(
+              (review) =>
+                review.state === 'APPROVED' &&
+                review.user.type !== 'Bot' &&
+                review.user.login !== pr.user?.login,
+            ).length
+
+            // Labels of the issue this pull request closes, so an issue's risk
+            // label participates in classification.
+            const closes = /\b(?:closes|fixes|resolves)\s+#(\d+)\b/i.exec(pr.body ?? '')
+            let issueLabels = []
+            if (closes !== null) {
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  owner, repo, issue_number: Number(closes[1]),
+                })
+                issueLabels = issue.labels.map((l) => (typeof l === 'string' ? l : l.name ?? ''))
+                fs.writeFileSync(path.join(outputDir, 'issue-body.md'), issue.body ?? '')
+              } catch (error) {
+                core.warning(`Could not read issue #${closes[1]}: ${error.message}`)
+              }
+            }
+
+            // The loop's own state lives in a sticky comment on the pull request.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: pull_number, per_page: 100,
+            })
+            const sticky = comments.find(
+              (comment) =>
+                comment.user?.type === 'Bot' && comment.body?.includes('<!-- newsdeck-loop-state -->'),
+            )
+            if (sticky !== undefined) core.setOutput('sticky_comment_id', String(sticky.id))
+
+            const requiredChecks = (process.env.LOOP_REQUIRED_CHECKS ?? 'Lint and types,Tests,Build,End-to-end')
+              .split(',')
+              .map((name) => name.trim())
+              .filter((name) => name.length > 0)
+
+            fs.writeFileSync(
+              path.join(outputDir, 'context.json'),
+              JSON.stringify({
+                pullRequest: {
+                  number: pull_number,
+                  headSha: pr.head.sha,
+                  isDraft: Boolean(pr.draft),
+                  isFork: pr.head.repo?.full_name !== `${owner}/${repo}`,
+                  labels: pr.labels.map((l) => l.name),
+                  body: pr.body ?? null,
+                },
+                issueLabels,
+                checks,
+                requiredChecks,
+                humanApprovals,
+                stickyComment: sticky?.body ?? null,
+              }, null, 2),
+            )
+
+      - name: Build the review prompt
+        if: steps.resolve.outputs.found == 'true'
+        env:
+          LOOP_DIFF: .loop/pr.diff
+          LOOP_ISSUE_BODY: .loop/issue-body.md
+          LOOP_PR_BODY: .loop/pr-body.md
+        run: bun tooling/loop/bin/review-prompt.ts
+
+      # --- Review agent -----------------------------------------------------
+      # Disabled unless a provider is configured. With no provider the
+      # evaluation below sees no review output and reports `blocked`, which
+      # prevents an automatic merge and asks for a human. That is the intended
+      # default: this repository ships the orchestration, not the model.
+      #
+      # NOT VERIFIED IN THIS REPOSITORY. Before setting the variable, confirm
+      # the action reference and that it writes its answer to the path below.
+      - name: Run the review agent
+        id: review_agent
+        if: steps.resolve.outputs.found == 'true' && vars.LOOP_REVIEW_PROVIDER == 'claude-code-action'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt_file: .loop/prompt.md
+          output_file: .loop/review.txt
+
+      - name: Record that no review agent ran
+        if: steps.resolve.outputs.found == 'true' && vars.LOOP_REVIEW_PROVIDER != 'claude-code-action'
+        run: |
+          echo "No review agent provider configured (vars.LOOP_REVIEW_PROVIDER is unset)." >&2
+          echo "The gate will report 'blocked' and require a human." >&2
+
+      - name: Evaluate the gate
+        id: evaluate
+        if: steps.resolve.outputs.found == 'true'
+        env:
+          LOOP_CONTEXT: .loop/context.json
+          LOOP_DIFF: .loop/pr.diff
+          LOOP_REVIEW_OUTPUT: ${{ vars.LOOP_REVIEW_PROVIDER != '' && '.loop/review.txt' || '' }}
+          LOOP_POLICY: .github/loop-policy.json
+        run: bun tooling/loop/bin/evaluate-pr.ts
+
+      - name: Publish the gate check runs
+        if: steps.resolve.outputs.found == 'true'
+        uses: actions/github-script@v7
+        env:
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          RISK_GATE: ${{ steps.evaluate.outputs.risk_gate }}
+          REVIEW_GATE: ${{ steps.evaluate.outputs.review_gate }}
+          RISK: ${{ steps.evaluate.outputs.risk }}
+          DECISION: ${{ steps.evaluate.outputs.decision }}
+        with:
+          script: |
+            const fs = require('node:fs')
+            const result = JSON.parse(fs.readFileSync('.loop/result.json', 'utf8'))
+            const reasons = result.outcome.reasons.join('\n- ')
+
+            // These two check runs are what a repository ruleset should require.
+            // Enforcement then belongs to GitHub, not to this workflow: a bug
+            // here cannot merge a pull request the ruleset would refuse.
+            for (const [name, conclusion, title] of [
+              ['loop/risk-gate', process.env.RISK_GATE, `risk: ${process.env.RISK}`],
+              ['loop/review-gate', process.env.REVIEW_GATE, `review: ${result.review.status}`],
+            ]) {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name,
+                head_sha: process.env.HEAD_SHA,
+                status: 'completed',
+                conclusion,
+                output: {
+                  title,
+                  summary: `Decision: **${process.env.DECISION}**\n\n- ${reasons}`,
+                },
+              })
+            }
+
+      - name: Update the sticky comment and labels
+        if: steps.resolve.outputs.found == 'true'
+        uses: actions/github-script@v7
+        env:
+          PULL_NUMBER: ${{ steps.resolve.outputs.number }}
+          STICKY_ID: ${{ steps.resolve.outputs.sticky_comment_id }}
+          DECISION: ${{ steps.evaluate.outputs.decision }}
+          RISK: ${{ steps.evaluate.outputs.risk }}
+          ISSUE: ${{ steps.evaluate.outputs.issue }}
+        with:
+          script: |
+            const fs = require('node:fs')
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const issue_number = Number(process.env.PULL_NUMBER)
+            const body = fs.readFileSync('.loop/summary.md', 'utf8')
+
+            const stickyId = process.env.STICKY_ID
+            if (stickyId !== undefined && stickyId !== '') {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: Number(stickyId), body,
+              })
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body })
+            }
+
+            // Risk label on the pull request, one value at a time.
+            const risk = process.env.RISK
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number })
+            const existing = pr.labels.map((l) => l.name)
+            for (const stale of ['risk:low', 'risk:medium', 'risk:high']) {
+              if (stale !== `risk:${risk}` && existing.includes(stale)) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name: stale })
+              }
+            }
+            if (!existing.includes(`risk:${risk}`)) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [`risk:${risk}`] })
+            }
+
+            // Lifecycle label on the linked issue.
+            const linkedIssue = process.env.ISSUE
+            if (linkedIssue !== undefined && linkedIssue !== '') {
+              const decision = process.env.DECISION
+              const target = decision === 'blocked' ? 'agent:blocked' : 'agent:review'
+              const issueNumber = Number(linkedIssue)
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber })
+              const current = issue.labels.map((l) => (typeof l === 'string' ? l : l.name ?? ''))
+
+              for (const stale of ['agent:ready', 'agent:in-progress', 'agent:review', 'agent:blocked']) {
+                if (stale !== target && current.includes(stale)) {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: stale })
+                }
+              }
+              if (!current.includes(target)) {
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: issueNumber, labels: [target],
+                })
+              }
+            }
+
+      - name: Enable auto-merge
+        if: steps.resolve.outputs.found == 'true' && steps.evaluate.outputs.decision == 'auto_merge'
+        uses: actions/github-script@v7
+        env:
+          PULL_NUMBER: ${{ steps.resolve.outputs.number }}
+        with:
+          script: |
+            // GitHub's own auto-merge, not a merge call. It fires only once the
+            // repository's required checks pass, so the ruleset remains the
+            // final authority even if this workflow is wrong.
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(process.env.PULL_NUMBER),
+            })
+
+            try {
+              await github.graphql(
+                `mutation ($id: ID!) {
+                   enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) {
+                     clientMutationId
+                   }
+                 }`,
+                { id: pr.node_id },
+              )
+              core.info('Auto-merge enabled (squash).')
+            } catch (error) {
+              // Most often: auto-merge is disabled for the repository, or the
+              // pull request is already mergeable with no required checks.
+              core.warning(`Could not enable auto-merge: ${error.message}`)
+              core.notice(
+                'Enable "Allow auto-merge" in repository settings and require the loop gate checks in a ruleset.',
+              )
+            }
+
+      - name: Request the fix loop
+        if: steps.resolve.outputs.found == 'true' && steps.evaluate.outputs.should_dispatch_fix == 'true'
+        uses: actions/github-script@v7
+        env:
+          PULL_NUMBER: ${{ steps.resolve.outputs.number }}
+          ATTEMPTS: ${{ steps.evaluate.outputs.review_attempts }}
+        with:
+          script: |
+            // The coding agent runs in its own workflow so that this one keeps
+            // no ability to execute anything on a pull request's behalf.
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'loop-agent-dispatch.yml',
+              ref: context.payload.repository.default_branch,
+              inputs: {
+                mode: 'fix',
+                pull_request: process.env.PULL_NUMBER,
+                attempt: process.env.ATTEMPTS,
+              },
+            })
+
+      - name: Write the job summary
+        if: always() && steps.resolve.outputs.found == 'true'
+        run: cat "$LOOP_OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the run when the loop is blocked
+        if: steps.resolve.outputs.found == 'true' && steps.evaluate.outputs.decision == 'blocked'
+        run: |
+          echo "The loop is blocked and needs a human. See the job summary." >&2
+          exit 1

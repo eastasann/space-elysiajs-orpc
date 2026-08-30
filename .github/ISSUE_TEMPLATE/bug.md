@@ -32,6 +32,12 @@ assignees: ''
 - Affected service(s): <!-- web / admin / api / worker / proxy / db / redis -->
 - Commit:
 
+## Depends on
+
+<!-- Issues that must be closed first, or `none`. Read by the autonomous loop. -->
+
+none
+
 ## Acceptance Criteria
 
 - [ ] A test reproduces the failure and fails before the fix

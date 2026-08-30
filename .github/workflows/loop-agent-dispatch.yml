@@ -1,0 +1,223 @@
+name: Loop - coding agent dispatch
+
+# The boundary between this repository's orchestration and whatever runs the
+# coding agent.
+#
+# This repository implements everything up to the invocation: selecting an
+# issue, claiming it, building the task, and reporting the outcome. It does not
+# ship an agent runner. Unless a provider is configured this workflow reports
+# that the runner is missing and fails loudly, which is the honest signal — a
+# loop that quietly does nothing looks identical to one that is working.
+#
+# To connect a runner, set the repository variable LOOP_AGENT_PROVIDER and the
+# matching secret. See docs/loop-engineering.md#connecting-a-coding-agent.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'implement (start an issue) or fix (address review findings)'
+        required: true
+        type: choice
+        options: [implement, fix]
+      issue:
+        description: 'Issue number, for mode=implement'
+        required: false
+        type: string
+      pull_request:
+        description: 'Pull request number, for mode=fix'
+        required: false
+        type: string
+      attempt:
+        description: 'Review attempt this fix responds to'
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: loop-agent-${{ inputs.issue || inputs.pull_request }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.3.11'
+
+jobs:
+  dispatch:
+    name: Dispatch the coding agent
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # lifecycle labels and the status comment
+      pull-requests: write
+
+    steps:
+      - name: Validate the inputs
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ inputs.mode }}
+          ISSUE: ${{ inputs.issue }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+          ATTEMPT: ${{ inputs.attempt }}
+        with:
+          script: |
+            // Dispatch inputs are free-form strings. They end up in an agent
+            // prompt further down, so reject anything that is not a plain
+            // number before it gets there.
+            const numeric = (value) => value === undefined || value === '' || /^[0-9]{1,9}$/.test(value)
+
+            for (const [name, value] of Object.entries({
+              issue: process.env.ISSUE,
+              pull_request: process.env.PULL_REQUEST,
+              attempt: process.env.ATTEMPT,
+            })) {
+              if (!numeric(value)) core.setFailed(`Input ${name} must be a number, got: ${JSON.stringify(value)}`)
+            }
+
+            const mode = process.env.MODE
+            if (mode !== 'implement' && mode !== 'fix') core.setFailed(`Unknown mode: ${mode}`)
+            if (mode === 'implement' && !process.env.ISSUE) core.setFailed('mode=implement needs an issue')
+            if (mode === 'fix' && !process.env.PULL_REQUEST) core.setFailed('mode=fix needs a pull_request')
+
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Claim the issue
+        id: claim
+        if: inputs.mode == 'implement'
+        uses: actions/github-script@v7
+        env:
+          ISSUE: ${{ inputs.issue }}
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const issue_number = Number(process.env.ISSUE)
+
+            if (!Number.isInteger(issue_number)) {
+              core.setFailed('mode=implement requires an issue number')
+              return
+            }
+
+            const { data: before } = await github.rest.issues.get({ owner, repo, issue_number })
+            const labels = before.labels.map((l) => (typeof l === 'string' ? l : l.name ?? ''))
+
+            if (before.state !== 'open') {
+              core.setFailed(`Issue #${issue_number} is ${before.state}.`)
+              return
+            }
+            if (labels.includes('agent:in-progress')) {
+              core.setFailed(`Issue #${issue_number} is already claimed (agent:in-progress).`)
+              return
+            }
+            if (labels.includes('agent:blocked')) {
+              core.setFailed(`Issue #${issue_number} is blocked and needs a human.`)
+              return
+            }
+            if (!labels.includes('agent:ready')) {
+              core.setFailed(`Issue #${issue_number} does not carry agent:ready.`)
+              return
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: ['agent:in-progress'],
+            })
+            await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'agent:ready' })
+              .catch(() => {})
+
+            // Re-read and confirm the claim. GitHub offers no compare-and-set on
+            // labels, so this narrows the race rather than closing it; the
+            // workflow-level concurrency group is the primary defence. The
+            // limitation is documented in docs/loop-engineering.md.
+            const { data: after } = await github.rest.issues.get({ owner, repo, issue_number })
+            const claimed = after.labels
+              .map((l) => (typeof l === 'string' ? l : l.name ?? ''))
+              .includes('agent:in-progress')
+
+            if (!claimed) {
+              core.setFailed(`Could not claim issue #${issue_number}.`)
+              return
+            }
+
+            core.setOutput('claimed', 'true')
+            core.setOutput('title', after.title)
+
+      - name: Report that no agent runner is configured
+        if: vars.LOOP_AGENT_PROVIDER == ''
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ inputs.mode }}
+          ISSUE: ${{ inputs.issue }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+          ATTEMPT: ${{ inputs.attempt }}
+        with:
+          script: |
+            const target = process.env.ISSUE || process.env.PULL_REQUEST
+            const lines = [
+              '### Coding agent not dispatched',
+              '',
+              'The loop reached the point of invoking the coding agent, but no runner',
+              'is configured for this repository.',
+              '',
+              `- Mode: \`${process.env.MODE}\``,
+              `- Target: ${target ? `#${target}` : '(none)'}`,
+              `- Review attempt: ${process.env.ATTEMPT || 'n/a'}`,
+              '',
+              '**To connect one**, set the repository variable `LOOP_AGENT_PROVIDER`',
+              'and its matching secret, then re-run this workflow. See',
+              '`docs/loop-engineering.md#connecting-a-coding-agent`.',
+              '',
+              'Until then, implement the issue by hand. Everything else in the loop —',
+              'risk classification, review, gates, merge policy, next-issue selection —',
+              'runs normally on the resulting pull request.',
+            ].join('\n')
+
+            core.summary.addRaw(lines).write()
+
+            if (target) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: Number(target),
+                body: lines,
+              })
+              if (process.env.MODE === 'implement') {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: Number(target),
+                  labels: ['agent:blocked'],
+                })
+              }
+            }
+
+            // Fail on purpose. "Required credentials are unavailable" is an
+            // explicit stop condition, and a stop condition must be visible.
+            core.setFailed('No coding agent runner is configured; the loop stops here.')
+
+      # --- Provider integration --------------------------------------------
+      # Runs only when LOOP_AGENT_PROVIDER selects it.
+      #
+      # NOT VERIFIED IN THIS REPOSITORY: no Anthropic credential and no Claude
+      # GitHub App installation were available when this workflow was written.
+      # Confirm the action reference, its inputs, and that it opens a pull
+      # request before enabling this in a repository you care about.
+      - name: Run the coding agent
+        if: vars.LOOP_AGENT_PROVIDER == 'claude-code-action'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Work the task described by ${{ inputs.mode == 'fix' && format('pull request #{0}', inputs.pull_request) || format('issue #{0}', inputs.issue) }}.
+            Follow AGENTS.md exactly, including the verification and self-review steps.
+            Open a pull request that references the issue with "Closes #N".
