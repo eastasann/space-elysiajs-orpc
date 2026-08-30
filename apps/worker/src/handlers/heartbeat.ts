@@ -13,11 +13,14 @@ import type { JobHandler } from './registry.ts'
  * schedules it, consumes it, and the API reports the result through
  * `system.status`. News ingestion handlers will follow the same shape.
  */
-export function createHeartbeatHandler(redis: RedisConnection): JobHandler<HeartbeatPayload> {
+export function createHeartbeatHandler(
+  redis: RedisConnection,
+  namespace?: string,
+): JobHandler<HeartbeatPayload> {
   return {
     definition: heartbeatJob,
     async process(payload, context) {
-      await publishWorkerHeartbeat(redis, context.instanceId)
+      await publishWorkerHeartbeat(redis, context.instanceId, namespace)
       context.logger.debug({ requestId: payload.requestId }, 'heartbeat published')
     },
   }

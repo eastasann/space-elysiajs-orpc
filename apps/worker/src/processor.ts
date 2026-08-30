@@ -1,5 +1,5 @@
+import type { QueuedJob } from '@newsdeck/jobs'
 import type { Logger } from '@newsdeck/logger'
-import type { Job } from 'bullmq'
 import type { AnyJobHandler } from './handlers/registry.ts'
 
 export class UnknownJobError extends Error {
@@ -29,7 +29,7 @@ export interface ProcessorOptions {
  * logging rules can be tested without a Redis connection.
  */
 export function createProcessor(options: ProcessorOptions) {
-  return async function process(job: Job): Promise<void> {
+  return async function process(job: QueuedJob): Promise<void> {
     const handler = options.registry.get(job.name)
     if (handler === undefined) {
       // Throwing routes the job to the failed set, where it stays visible for

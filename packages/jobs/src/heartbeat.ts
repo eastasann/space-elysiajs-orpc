@@ -1,6 +1,9 @@
+import { DEFAULT_JOBS_NAMESPACE } from './namespace.ts'
 import type { RedisConnection } from './types.ts'
 
-const HEARTBEAT_KEY = 'newsdeck:worker:heartbeat'
+function heartbeatKey(namespace: string): string {
+  return `${namespace}:worker:heartbeat`
+}
 
 /**
  * How long a published heartbeat stays readable. Comfortably longer than the
@@ -18,9 +21,10 @@ export interface WorkerHeartbeatRecord {
 export async function publishWorkerHeartbeat(
   redis: RedisConnection,
   instanceId: string,
+  namespace: string = DEFAULT_JOBS_NAMESPACE,
 ): Promise<void> {
   const payload = JSON.stringify({ instanceId, observedAt: new Date().toISOString() })
-  await redis.set(HEARTBEAT_KEY, payload, 'EX', HEARTBEAT_TTL_SECONDS)
+  await redis.set(heartbeatKey(namespace), payload, 'EX', HEARTBEAT_TTL_SECONDS)
 }
 
 /**
@@ -28,11 +32,15 @@ export async function publishWorkerHeartbeat(
  *
  * Returns `null` when no worker has reported inside the TTL — which is exactly
  * what a stopped or wedged worker looks like from the API's point of view.
+ *
+ * `namespace` must match the one the worker publishes under, or every read
+ * looks like a dead worker.
  */
 export async function readWorkerHeartbeat(
   redis: RedisConnection,
+  namespace: string = DEFAULT_JOBS_NAMESPACE,
 ): Promise<WorkerHeartbeatRecord | null> {
-  const raw = await redis.get(HEARTBEAT_KEY)
+  const raw = await redis.get(heartbeatKey(namespace))
   if (raw === null) return null
 
   try {

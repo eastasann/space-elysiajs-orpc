@@ -166,8 +166,16 @@ scans every source file for forbidden import specifiers;
 rather than importing it from `@newsdeck/logger`, which would drag pino into
 browser bundles. A test asserts the two definitions stay identical.
 
-`@newsdeck/jobs` exposes `JobQueue` and `RedisConnection` aliases so no
-application names `bullmq` or `ioredis` directly.
+`@newsdeck/jobs` owns every reference to the queue implementation: it
+constructs both the queue and the worker, and exposes `JobQueue`, `JobWorker`,
+`QueuedJob` and `RedisConnection` aliases, so no application names `bullmq` or
+`ioredis` directly.
+
+Every Redis key it owns — BullMQ's queue keys and the worker heartbeat — is
+prefixed with a **namespace**, defaulting to `newsdeck`. A producer and a
+consumer only meet if their namespaces match. That is what lets several
+deployments, or several concurrent test suites, share one Redis without
+consuming each other's jobs.
 
 ---
 
@@ -220,6 +228,8 @@ None of it is implemented. What exists is the boundary it will be built on:
   job to BullMQ's failed set rather than being dropped.
 - **Correlation ids travel on the payload**, so one browser request can be
   followed into the background work it caused.
+- **Keys are namespaced**, so a test suite or a second deployment sharing the
+  Redis instance cannot consume jobs that are not its own.
 
 The one job that exists, `system.heartbeat`, runs on a repeating schedule and
 publishes worker liveness to Redis with a TTL. The API reports it through

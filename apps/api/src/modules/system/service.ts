@@ -10,6 +10,11 @@ export interface SystemServiceDependencies {
   instanceId: string
   /** Process start time, used to derive uptime. */
   startedAt: number
+  /**
+   * Jobs namespace to observe. Must match the one the worker publishes under,
+   * or the heartbeat below will always read as absent.
+   */
+  namespace?: string
 }
 
 export interface SystemService {
@@ -32,7 +37,7 @@ export function createSystemService(deps: SystemServiceDependencies): SystemServ
       deps.repository.probe(),
       probeRedis(deps.redis),
       readQueueDepth(deps.queue),
-      readWorkerHeartbeat(deps.redis),
+      readWorkerHeartbeat(deps.redis, deps.namespace),
     ])
 
     return {

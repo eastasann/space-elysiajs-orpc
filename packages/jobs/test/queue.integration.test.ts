@@ -14,6 +14,16 @@ import {
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL
 
 /**
+ * Every Redis key this suite touches is namespaced to it.
+ *
+ * Without that, a worker running against the same Redis — the compose stack, or
+ * the concurrently executing `@newsdeck/worker` suite — would consume these
+ * jobs and overwrite this heartbeat, and the assertions below would be racing
+ * something they cannot see.
+ */
+const NAMESPACE = 'newsdeck-test-jobs'
+
+/**
  * Integration coverage for the queue boundary. Requires a Redis-compatible
  * service; see docs/development.md#testing.
  */
@@ -23,7 +33,7 @@ describe.skipIf(!TEST_REDIS_URL)('queue and heartbeat against a live Redis', () 
 
   beforeAll(async () => {
     redis = createRedisConnection({ url: TEST_REDIS_URL as string, clientName: 'jobs-test' })
-    queue = createSystemQueue(redis)
+    queue = createSystemQueue(redis, NAMESPACE)
     await queue.obliterate({ force: true }).catch(() => {})
   })
 
@@ -49,15 +59,15 @@ describe.skipIf(!TEST_REDIS_URL)('queue and heartbeat against a live Redis', () 
   })
 
   it('returns null before any heartbeat is published', async () => {
-    await redis.del('newsdeck:worker:heartbeat')
+    await redis.del(`${NAMESPACE}:worker:heartbeat`)
 
-    expect(await readWorkerHeartbeat(redis)).toBeNull()
+    expect(await readWorkerHeartbeat(redis, NAMESPACE)).toBeNull()
   })
 
   it('round-trips a published heartbeat', async () => {
-    await publishWorkerHeartbeat(redis, 'worker-test-1')
+    await publishWorkerHeartbeat(redis, 'worker-test-1', NAMESPACE)
 
-    const heartbeat = await readWorkerHeartbeat(redis)
+    const heartbeat = await readWorkerHeartbeat(redis, NAMESPACE)
 
     expect(heartbeat?.instanceId).toBe('worker-test-1')
     expect(heartbeat?.ageSeconds).toBeLessThan(5)
@@ -65,15 +75,15 @@ describe.skipIf(!TEST_REDIS_URL)('queue and heartbeat against a live Redis', () 
   })
 
   it('expires the heartbeat so a stopped worker stops looking alive', async () => {
-    await publishWorkerHeartbeat(redis, 'worker-test-1')
+    await publishWorkerHeartbeat(redis, 'worker-test-1', NAMESPACE)
 
-    expect(await redis.ttl('newsdeck:worker:heartbeat')).toBeGreaterThan(0)
+    expect(await redis.ttl(`${NAMESPACE}:worker:heartbeat`)).toBeGreaterThan(0)
   })
 
   it('treats a corrupt heartbeat record as absent', async () => {
-    await redis.set('newsdeck:worker:heartbeat', 'not json')
+    await redis.set(`${NAMESPACE}:worker:heartbeat`, 'not json')
 
-    expect(await readWorkerHeartbeat(redis)).toBeNull()
+    expect(await readWorkerHeartbeat(redis, NAMESPACE)).toBeNull()
   })
 })
 

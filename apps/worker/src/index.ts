@@ -10,11 +10,12 @@ import { parseEnv } from '@newsdeck/config'
 import {
   createRedisConnection,
   createSystemQueue,
+  createSystemWorker,
   heartbeatJob,
+  type QueuedJob,
   SYSTEM_QUEUE_NAME,
 } from '@newsdeck/jobs'
 import { createLogger } from '@newsdeck/logger'
-import { Worker } from 'bullmq'
 import { workerEnvSchema } from './env.ts'
 import { createHeartbeatHandler } from './handlers/heartbeat.ts'
 import { createHandlerRegistry } from './handlers/registry.ts'
@@ -50,15 +51,16 @@ const queue = createSystemQueue(producerRedis)
 
 const registry = createHandlerRegistry([createHeartbeatHandler(producerRedis)])
 
-const worker = new Worker(SYSTEM_QUEUE_NAME, createProcessor({ registry, logger, instanceId }), {
+const worker = createSystemWorker({
   connection: consumerRedis,
+  processor: createProcessor({ registry, logger, instanceId }),
   concurrency: env.WORKER_CONCURRENCY,
 })
 
-worker.on('failed', (job, error) => {
+worker.on('failed', (job: QueuedJob | undefined, error: Error) => {
   logger.error({ err: error, jobId: job?.id, jobName: job?.name }, 'job failed')
 })
-worker.on('error', (error) => logger.error({ err: error }, 'worker error'))
+worker.on('error', (error: Error) => logger.error({ err: error }, 'worker error'))
 
 /**
  * Register the repeating heartbeat.

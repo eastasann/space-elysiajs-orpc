@@ -13,7 +13,6 @@
     "@newsdeck/config": "workspace:*",
     "@newsdeck/jobs": "workspace:*",
     "@newsdeck/logger": "workspace:*",
-    "bullmq": "6.3.2",
     "zod": "4.5.4"
   }
 }

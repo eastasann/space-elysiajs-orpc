@@ -178,6 +178,12 @@ services** and drives it with `app.handle(request)` — full transport coverage,
 no infrastructure. `apps/api/test/rpc.integration.test.ts` does the opposite: a
 real oRPC client over a real server over real PostgreSQL and Valkey.
 
+Every suite that touches Redis passes its own **jobs namespace**, so it owns its
+queue and heartbeat outright. Without that, the compose worker — or the suite
+Turborepo is running in parallel — would consume its jobs, and the assertions
+would be racing something they cannot see. Point `TEST_REDIS_URL` at the same
+Valkey the stack uses; the namespace is what keeps them apart.
+
 ### End-to-end
 
 ```bash

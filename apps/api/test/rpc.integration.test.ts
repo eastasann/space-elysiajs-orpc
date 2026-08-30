@@ -18,6 +18,9 @@ import { buildServer } from '../src/server.ts'
 import { silentLogger } from './support/fakes.ts'
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL
+
+/** Namespaced so a live worker cannot overwrite the heartbeat asserted below. */
+const NAMESPACE = 'newsdeck-test-api'
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL
 const canRun = Boolean(TEST_DATABASE_URL) && Boolean(TEST_REDIS_URL)
 
@@ -42,7 +45,7 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
     await runMigrations(database)
 
     redis = createRedisConnection({ url: TEST_REDIS_URL as string, clientName: 'api-itest' })
-    queue = createSystemQueue(redis)
+    queue = createSystemQueue(redis, NAMESPACE)
 
     const server = buildServer({
       logger: silentLogger(),
@@ -61,6 +64,7 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
           queue,
           instanceId: 'api-itest',
           startedAt: Date.now() - 5_000,
+          namespace: NAMESPACE,
         }),
       },
     })
@@ -119,7 +123,7 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
   })
 
   it('surfaces a worker heartbeat once one has been published', async () => {
-    await publishWorkerHeartbeat(redis, 'worker-itest')
+    await publishWorkerHeartbeat(redis, 'worker-itest', NAMESPACE)
 
     const status = await client.system.status()
 

@@ -1,4 +1,4 @@
-import type { Queue } from 'bullmq'
+import type { Job, Queue, Worker } from 'bullmq'
 import type { Redis } from 'ioredis'
 
 /**
@@ -8,4 +8,6 @@ import type { Redis } from 'ioredis'
  * that swapping the queue implementation stays a change inside this package.
  */
 export type JobQueue = Queue
+export type JobWorker = Worker
+export type QueuedJob = Job
 export type RedisConnection = Redis

@@ -2,19 +2,26 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import {
   createRedisConnection,
   createSystemQueue,
+  createSystemWorker,
   heartbeatJob,
   type JobQueue,
+  type JobWorker,
   type RedisConnection,
   readWorkerHeartbeat,
-  SYSTEM_QUEUE_NAME,
 } from '@newsdeck/jobs'
 import { createLogger } from '@newsdeck/logger'
-import { Worker } from 'bullmq'
 import { createHeartbeatHandler } from '../src/handlers/heartbeat.ts'
 import { createHandlerRegistry } from '../src/handlers/registry.ts'
 import { createProcessor } from '../src/processor.ts'
 
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL
+
+/**
+ * Namespaced so this suite owns its queue outright. Any other consumer on the
+ * same Redis — the compose worker, or the concurrently executing
+ * `@newsdeck/jobs` suite — would otherwise race it for these jobs.
+ */
+const NAMESPACE = 'newsdeck-test-worker'
 
 function silentLogger() {
   return createLogger({
@@ -44,7 +51,7 @@ describe.skipIf(!TEST_REDIS_URL)('worker consuming from a live queue', () => {
   let producerRedis: RedisConnection
   let consumerRedis: RedisConnection
   let queue: JobQueue
-  let worker: Worker
+  let worker: JobWorker
 
   beforeAll(async () => {
     producerRedis = createRedisConnection({
@@ -56,19 +63,20 @@ describe.skipIf(!TEST_REDIS_URL)('worker consuming from a live queue', () => {
       clientName: 'worker-itest-consumer',
     })
 
-    queue = createSystemQueue(producerRedis)
+    queue = createSystemQueue(producerRedis, NAMESPACE)
     await queue.obliterate({ force: true }).catch(() => {})
-    await producerRedis.del('newsdeck:worker:heartbeat')
+    await producerRedis.del(`${NAMESPACE}:worker:heartbeat`)
 
-    worker = new Worker(
-      SYSTEM_QUEUE_NAME,
-      createProcessor({
-        registry: createHandlerRegistry([createHeartbeatHandler(producerRedis)]),
+    worker = createSystemWorker({
+      connection: consumerRedis,
+      processor: createProcessor({
+        registry: createHandlerRegistry([createHeartbeatHandler(producerRedis, NAMESPACE)]),
         logger: silentLogger(),
         instanceId: 'worker-itest',
       }),
-      { connection: consumerRedis, concurrency: 1 },
-    )
+      concurrency: 1,
+      namespace: NAMESPACE,
+    })
     await worker.waitUntilReady()
   })
 
@@ -82,7 +90,7 @@ describe.skipIf(!TEST_REDIS_URL)('worker consuming from a live queue', () => {
   it('consumes a heartbeat job and publishes worker liveness', async () => {
     await queue.add(heartbeatJob.name, { requestId: 'req-worker-itest1' })
 
-    const heartbeat = await waitFor(() => readWorkerHeartbeat(producerRedis))
+    const heartbeat = await waitFor(() => readWorkerHeartbeat(producerRedis, NAMESPACE))
 
     expect(heartbeat?.instanceId).toBe('worker-itest')
     expect(heartbeat?.ageSeconds).toBeLessThan(15)

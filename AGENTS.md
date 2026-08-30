@@ -170,6 +170,8 @@ migration and never change one that has already been merged.
    `apps/worker/src/index.ts`.
 3. Payloads are validated against the definition before the handler runs — a
    queue outlives any single deploy, so never assume the payload is well formed.
+4. In tests that touch Redis, pass a namespace unique to the suite. Otherwise a
+   running worker, or a suite executing in parallel, will consume your jobs.
 
 ---
 
