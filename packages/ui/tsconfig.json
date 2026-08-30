@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["react", "bun"]
+    "types": ["react", "react-dom", "bun"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]
 }

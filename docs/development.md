@@ -178,6 +178,20 @@ services** and drives it with `app.handle(request)` — full transport coverage,
 no infrastructure. `apps/api/test/rpc.integration.test.ts` does the opposite: a
 real oRPC client over a real server over real PostgreSQL and Valkey.
 
+### Component tests
+
+`apps/web`, `apps/admin` and `packages/ui` render components with
+[Testing Library](https://testing-library.com/) in each package's `test/`
+directory, alongside its other unit tests. `bun test` has no DOM by default, so
+each package's `test` script preloads `happy-dom` — the smallest registrator
+that works with React 19 — with `bun test --preload ./test/happydom.ts`; run
+that flag yourself if you invoke `bun test` directly instead of through
+`bun run test`.
+
+Tests never go through `@newsdeck/api-client`'s real transport. A component
+that needs the API client, such as `LoadBalancingProbe`, takes one as a prop
+that defaults to the app's real client; tests pass a fake instead.
+
 Every suite that touches Redis passes its own **jobs namespace**, so it owns its
 queue and heartbeat outright. Without that, the compose worker — or the suite
 Turborepo is running in parallel — would consume its jobs, and the assertions

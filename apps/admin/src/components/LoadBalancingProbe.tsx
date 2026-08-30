@@ -1,7 +1,8 @@
+import type { ApiClient } from '@newsdeck/api-client'
 import { KeyValueList, Panel, StatusBadge, statusTone } from '@newsdeck/ui'
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
-import { apiClient } from '~/lib/api.ts'
+import { apiClient as defaultApiClient } from '~/lib/api.ts'
 
 const SAMPLE_SIZE = 20
 
@@ -9,6 +10,11 @@ interface Sample {
   /** How many of the sampled calls each API replica answered. */
   countsByInstance: Record<string, number>
   failures: number
+}
+
+export interface LoadBalancingProbeProps {
+  /** Defaults to the app's real API client. Tests supply a fake. */
+  apiClient?: Pick<ApiClient, 'system'>
 }
 
 /**
@@ -20,7 +26,7 @@ interface Sample {
  * balancing rather than pinning. Calls are issued sequentially: concurrent
  * requests can share a connection and would understate the spread.
  */
-export function LoadBalancingProbe() {
+export function LoadBalancingProbe({ apiClient = defaultApiClient }: LoadBalancingProbeProps = {}) {
   const [sample, setSample] = useState<Sample | null>(null)
 
   const probe = useMutation({
