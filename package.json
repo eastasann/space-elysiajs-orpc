@@ -27,7 +27,11 @@
     "docker:down": "docker compose down",
     "docker:reset": "docker compose down --volumes --remove-orphans",
     "docker:logs": "docker compose logs -f",
-    "verify:lb": "bun scripts/verify-load-balancing.ts"
+    "verify:lb": "bun scripts/verify-load-balancing.ts",
+    "loop:status": "bun tooling/local-runner/bin/loop.ts status",
+    "loop:once": "bun tooling/local-runner/bin/loop.ts once",
+    "loop:watch": "bun tooling/local-runner/bin/loop.ts watch",
+    "loop:review": "bun tooling/local-runner/bin/loop.ts review"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.11",

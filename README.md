@@ -197,6 +197,29 @@ signals: nginx's `X-Upstream-Addr` header and the `instanceId` the API reports
 in its own response body. Exits non-zero if either pool answered from a single
 instance. See [`docs/architecture.md`](docs/architecture.md#load-balancing).
 
+## Local autonomous loop
+
+Issues labelled `agent:ready` can be worked by Claude Code running on your own
+machine, with your own subscription login. No Anthropic API key is needed.
+
+Prerequisites: [Claude Code](https://code.claude.com) (logged in),
+[GitHub CLI](https://cli.github.com) (`gh auth login`), Bun, Docker.
+
+```bash
+bun run loop:status            # readiness, backlog, anything in flight
+bun run loop:once --dry-run    # what would happen; changes nothing
+bun run loop:once              # take one issue through to a pull request
+bun run loop:review 42         # advisory review on a pull request
+bun run loop:watch             # keep going, on an interval
+```
+
+The runner works in an isolated git worktree, runs the repository's own checks
+before it pushes, and has no authority to merge: risk classification, the review
+gate and the merge decision stay on GitHub. It takes **one** issue and stops
+until you raise `LOOP_MAX_ISSUES`.
+
+See [`docs/local-agent-runner.md`](docs/local-agent-runner.md).
+
 ## Contributing
 
 Work is organised as GitHub Issues, one independently reviewable change at a
@@ -208,4 +231,6 @@ Issues labelled `agent:ready` are worked by an autonomous loop: a coding agent
 implements them, an automated review and a deterministic risk gate decide whether
 the result may merge, and anything touching security, infrastructure or
 architecture waits for a human. See
-[`docs/loop-engineering.md`](docs/loop-engineering.md).
+[`docs/loop-engineering.md`](docs/loop-engineering.md) for the GitHub side and
+[`docs/local-agent-runner.md`](docs/local-agent-runner.md) for the runner that
+executes it locally.

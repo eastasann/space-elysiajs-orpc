@@ -167,6 +167,17 @@
         "react": ">=19",
       },
     },
+    "tooling/local-runner": {
+      "name": "@newsdeck/local-runner",
+      "version": "0.0.0",
+      "dependencies": {
+        "@newsdeck/loop": "workspace:*",
+        "zod": "4.5.4",
+      },
+      "devDependencies": {
+        "@types/bun": "1.3.11",
+      },
+    },
     "tooling/loop": {
       "name": "@newsdeck/loop",
       "version": "0.0.0",
@@ -331,6 +342,8 @@
     "@newsdeck/db": ["@newsdeck/db@workspace:packages/db"],
 
     "@newsdeck/jobs": ["@newsdeck/jobs@workspace:packages/jobs"],
+
+    "@newsdeck/local-runner": ["@newsdeck/local-runner@workspace:tooling/local-runner"],
 
     "@newsdeck/logger": ["@newsdeck/logger@workspace:packages/logger"],
 
