@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { eq, sql } from 'drizzle-orm'
 import type { DatabaseHandle } from '../src/index.ts'
 import { createDatabase, probeDatabase, runMigrations } from '../src/index.ts'
-import { categories, sources, userIdentities, users } from '../src/schema/index.ts'
+import { articles, categories, sources, userIdentities, users } from '../src/schema/index.ts'
 import { seedCategories } from '../src/seed-categories.ts'
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL
@@ -33,6 +33,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     await handle.db.execute(sql`truncate table ${users} restart identity cascade`)
     await handle.db.execute(sql`truncate table ${sources} restart identity cascade`)
     await handle.db.execute(sql`truncate table ${categories} restart identity cascade`)
+    await handle.db.execute(sql`truncate table ${articles} restart identity cascade`)
   })
 
   afterAll(async () => {
@@ -50,6 +51,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     expect(names).toContain('user_identities')
     expect(names).toContain('sources')
     expect(names).toContain('categories')
+    expect(names).toContain('articles')
   })
 
   it('is idempotent when applied twice', async () => {
@@ -185,6 +187,134 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     expect(caught).toBeDefined()
     expect(cause?.code).toBe('23505')
     expect(cause?.constraint_name).toBe('categories_slug_unique')
+  })
+
+  it('inserts an article and rejects a duplicate canonical url', async () => {
+    const source = required(
+      (
+        await handle.db
+          .insert(sources)
+          .values({ name: 'Article Source', feedUrl: 'https://example.test/articles.xml' })
+          .returning()
+      )[0],
+      'source',
+    )
+
+    const [inserted] = await handle.db
+      .insert(articles)
+      .values({
+        sourceId: source.id,
+        url: 'https://example.test/articles/one?utm_source=rss',
+        canonicalUrl: 'https://example.test/articles/one',
+        title: 'Example Article',
+        contentHash: 'hash-one',
+        fetchedAt: new Date(),
+      })
+      .returning()
+    const article = required(inserted, 'article')
+
+    expect(article.canonicalUrl).toBe('https://example.test/articles/one')
+
+    let caught: unknown
+    try {
+      await handle.db.insert(articles).values({
+        sourceId: source.id,
+        url: 'https://example.test/articles/one?utm_source=other',
+        canonicalUrl: 'https://example.test/articles/one',
+        title: 'Duplicate Article',
+        contentHash: 'hash-two',
+        fetchedAt: new Date(),
+      })
+    } catch (error) {
+      caught = error
+    }
+
+    const cause = (caught as { cause?: { constraint_name?: string; code?: string } } | undefined)
+      ?.cause
+
+    expect(caught).toBeDefined()
+    expect(cause?.code).toBe('23505')
+    expect(cause?.constraint_name).toBe('articles_canonical_url_unique')
+  })
+
+  it('restricts deleting a source that still has articles', async () => {
+    const source = required(
+      (
+        await handle.db
+          .insert(sources)
+          .values({ name: 'Restricted Source', feedUrl: 'https://example.test/restricted.xml' })
+          .returning()
+      )[0],
+      'source',
+    )
+
+    await handle.db.insert(articles).values({
+      sourceId: source.id,
+      url: 'https://example.test/articles/restricted',
+      canonicalUrl: 'https://example.test/articles/restricted',
+      title: 'Restricted Article',
+      contentHash: 'hash-restricted',
+      fetchedAt: new Date(),
+    })
+
+    let caught: unknown
+    try {
+      await handle.db.delete(sources).where(eq(sources.id, source.id))
+    } catch (error) {
+      caught = error
+    }
+
+    const cause = (caught as { cause?: { code?: string } } | undefined)?.cause
+
+    expect(caught).toBeDefined()
+    expect(cause?.code).toBe('23503')
+  })
+
+  it('clears the category rather than deleting the article when its category is removed', async () => {
+    const source = required(
+      (
+        await handle.db
+          .insert(sources)
+          .values({ name: 'Categorised Source', feedUrl: 'https://example.test/categorised.xml' })
+          .returning()
+      )[0],
+      'source',
+    )
+    const category = required(
+      (
+        await handle.db
+          .insert(categories)
+          .values({ slug: 'tech', name: 'Tech', displayOrder: 0 })
+          .returning()
+      )[0],
+      'category',
+    )
+
+    const inserted = required(
+      (
+        await handle.db
+          .insert(articles)
+          .values({
+            sourceId: source.id,
+            categoryId: category.id,
+            url: 'https://example.test/articles/categorised',
+            canonicalUrl: 'https://example.test/articles/categorised',
+            title: 'Categorised Article',
+            contentHash: 'hash-categorised',
+            fetchedAt: new Date(),
+          })
+          .returning()
+      )[0],
+      'article',
+    )
+
+    await handle.db.delete(categories).where(eq(categories.id, category.id))
+
+    const remaining = required(
+      await handle.db.query.articles.findFirst({ where: eq(articles.id, inserted.id) }),
+      'article',
+    )
+    expect(remaining.categoryId).toBeNull()
   })
 
   it('seeds categories idempotently', async () => {

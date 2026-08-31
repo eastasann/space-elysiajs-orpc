@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { getTableConfig } from 'drizzle-orm/pg-core'
 import {
+  articles,
   categories,
   categorySlugSchema,
   sources,
@@ -101,6 +102,54 @@ describe('categories table', () => {
     expect(slugIndex?.config.columns.map((column) => 'name' in column && column.name)).toEqual([
       'slug',
     ])
+  })
+})
+
+describe('articles table', () => {
+  it('enforces a unique canonical url', () => {
+    const { indexes } = getTableConfig(articles)
+    const canonicalUrlIndex = indexes.find(
+      (index) => index.config.name === 'articles_canonical_url_unique',
+    )
+
+    expect(canonicalUrlIndex?.config.unique).toBe(true)
+    expect(
+      canonicalUrlIndex?.config.columns.map((column) => 'name' in column && column.name),
+    ).toEqual(['canonical_url'])
+  })
+
+  it('restricts deleting a source that still has articles', () => {
+    const { foreignKeys } = getTableConfig(articles)
+    const sourceFk = foreignKeys.find((fk) => fk.reference().foreignTable === sources)
+
+    expect(sourceFk?.onDelete).toBe('restrict')
+  })
+
+  it('clears the category rather than deleting the article', () => {
+    const { foreignKeys } = getTableConfig(articles)
+    const categoryFk = foreignKeys.find((fk) => fk.reference().foreignTable === categories)
+
+    expect(categoryFk?.onDelete).toBe('set null')
+  })
+
+  it('indexes fetched_at, newest first, for recency ordering', () => {
+    const { indexes } = getTableConfig(articles)
+    const recentIndex = indexes.find((index) => index.config.name === 'articles_fetched_at_idx')
+
+    expect(recentIndex?.config.columns.map((column) => 'name' in column && column.name)).toEqual([
+      'fetched_at',
+    ])
+  })
+
+  it('indexes category then fetched_at for per-category recency ordering', () => {
+    const { indexes } = getTableConfig(articles)
+    const categoryRecentIndex = indexes.find(
+      (index) => index.config.name === 'articles_category_fetched_at_idx',
+    )
+
+    expect(
+      categoryRecentIndex?.config.columns.map((column) => 'name' in column && column.name),
+    ).toEqual(['category_id', 'fetched_at'])
   })
 })
 
