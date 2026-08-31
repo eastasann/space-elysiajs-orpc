@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { REQUEST_ID_HEADER as LOGGER_HEADER } from '@newsdeck/logger'
-import { createApiClient, isDefinedError, newRequestId, REQUEST_ID_HEADER } from '../src/index.ts'
+import {
+  createApiClient,
+  isDefinedError,
+  newRequestId,
+  ORPCError,
+  REQUEST_ID_HEADER,
+} from '../src/index.ts'
 
 describe('createApiClient', () => {
   it('exposes both a direct client and TanStack Query bindings', () => {
@@ -21,6 +27,22 @@ describe('createApiClient', () => {
 describe('isDefinedError', () => {
   it('does not narrow a plain error', () => {
     expect(isDefinedError(new Error('boom'))).toBe(false)
+  })
+
+  it('narrows a defined ORPCError, e.g. the CONFLICT shape sourcesContract declares', () => {
+    const error = new ORPCError('CONFLICT', {
+      message: 'a source with this feed url already exists',
+      data: { feedUrl: 'https://example.test/feed.xml' },
+      defined: true,
+    })
+
+    expect(isDefinedError(error)).toBe(true)
+  })
+
+  it('does not narrow an ORPCError that was not declared by the contract', () => {
+    const error = new ORPCError('INTERNAL_SERVER_ERROR', { defined: false })
+
+    expect(isDefinedError(error)).toBe(false)
   })
 })
 

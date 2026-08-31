@@ -25,7 +25,7 @@ interface FieldIssue {
 }
 
 /** Groups a zod validation failure by the offending field, keeping the first message per field. */
-function fieldErrorsFrom(issues: readonly FieldIssue[]): SourceFieldErrors {
+export function fieldErrorsFrom(issues: readonly FieldIssue[]): SourceFieldErrors {
   const errors: SourceFieldErrors = {}
   for (const issue of issues) {
     const key = issue.path[0]
@@ -37,9 +37,12 @@ function fieldErrorsFrom(issues: readonly FieldIssue[]): SourceFieldErrors {
 }
 
 /** `''` means "not provided" in a form; the contract wants `null` or omission instead. */
-function normalizeSiteUrl(value: string): string | null {
+export function normalizeSiteUrl(value: string): string | null {
   return value.trim() === '' ? null : value
 }
+
+/** TanStack Query bindings for the `sources` procedures. Tests supply bindings built from a fake client, mirroring `LoadBalancingProbe`. */
+type SourcesOrpc = typeof orpc.sources
 
 export const Route = createFileRoute('/sources')({
   loader: ({ context }) =>
@@ -66,7 +69,12 @@ function SourcesPage() {
   )
 }
 
-function CreateSourceForm() {
+export interface CreateSourceFormProps {
+  /** Defaults to the app's real oRPC bindings. Tests supply a fake. */
+  sourcesOrpc?: SourcesOrpc
+}
+
+export function CreateSourceForm({ sourcesOrpc = orpc.sources }: CreateSourceFormProps = {}) {
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [feedUrl, setFeedUrl] = useState('')
@@ -75,9 +83,9 @@ function CreateSourceForm() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const create = useMutation(
-    orpc.sources.create.mutationOptions({
+    sourcesOrpc.create.mutationOptions({
       onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: orpc.sources.list.key() })
+        queryClient.invalidateQueries({ queryKey: sourcesOrpc.list.key() })
         setName('')
         setFeedUrl('')
         setSiteUrl('')
@@ -164,10 +172,15 @@ function CreateSourceForm() {
   )
 }
 
-function SourcesTable() {
+interface SourcesTableProps {
+  /** Defaults to the app's real oRPC bindings. Tests supply a fake. */
+  sourcesOrpc?: SourcesOrpc
+}
+
+function SourcesTable({ sourcesOrpc = orpc.sources }: SourcesTableProps = {}) {
   const [page, setPage] = useState(1)
   const { data } = useSuspenseQuery(
-    orpc.sources.list.queryOptions({ input: { page, pageSize: PAGE_SIZE } }),
+    sourcesOrpc.list.queryOptions({ input: { page, pageSize: PAGE_SIZE } }),
   )
   const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE))
 
@@ -187,7 +200,7 @@ function SourcesTable() {
           </thead>
           <tbody>
             {data.items.map((source) => (
-              <SourceRow key={source.id} source={source} />
+              <SourceRow key={source.id} source={source} sourcesOrpc={sourcesOrpc} />
             ))}
           </tbody>
         </table>
@@ -217,7 +230,13 @@ function SourcesTable() {
   )
 }
 
-function SourceRow({ source }: { source: Source }) {
+export interface SourceRowProps {
+  source: Source
+  /** Defaults to the app's real oRPC bindings. Tests supply a fake. */
+  sourcesOrpc?: SourcesOrpc
+}
+
+export function SourceRow({ source, sourcesOrpc = orpc.sources }: SourceRowProps) {
   const queryClient = useQueryClient()
   const [isEditing, setIsEditing] = useState(false)
   const [name, setName] = useState(source.name)
@@ -226,10 +245,10 @@ function SourceRow({ source }: { source: Source }) {
   const [fieldErrors, setFieldErrors] = useState<SourceFieldErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
 
-  const invalidateList = () => queryClient.invalidateQueries({ queryKey: orpc.sources.list.key() })
+  const invalidateList = () => queryClient.invalidateQueries({ queryKey: sourcesOrpc.list.key() })
 
   const update = useMutation(
-    orpc.sources.update.mutationOptions({
+    sourcesOrpc.update.mutationOptions({
       onSuccess: () => {
         invalidateList()
         setIsEditing(false)
@@ -249,8 +268,14 @@ function SourceRow({ source }: { source: Source }) {
   )
 
   const deactivate = useMutation(
-    orpc.sources.deactivate.mutationOptions({
-      onSuccess: invalidateList,
+    sourcesOrpc.deactivate.mutationOptions({
+      onSuccess: () => {
+        invalidateList()
+        setFormError(null)
+      },
+      onError: () => {
+        setFormError('Could not deactivate the source. Try again.')
+      },
     }),
   )
 
@@ -365,6 +390,7 @@ function SourceRow({ source }: { source: Source }) {
             </button>
           ) : null}
         </div>
+        {formError === null ? null : <p className="nd-form__error">{formError}</p>}
       </td>
     </tr>
   )
