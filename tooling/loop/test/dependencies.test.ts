@@ -78,4 +78,30 @@ describe('parseDependencyDeclaration', () => {
       dependencies: [4, 8],
     })
   })
+
+  it('treats a prose-only block as undeclared, not as none', () => {
+    // The real failure this guards: `Depends on **[M1.03] ...**.` names a
+    // milestone title, not an issue. Reading it as "checked, nothing blocks
+    // this" is exactly the meaning `Depends on: none` is reserved for, and it
+    // silently discarded the loop's dependency ordering (issue #48).
+    const body = [
+      '## Context',
+      '',
+      'Depends on **[M1.03] Expose sources through the oRPC contract**.',
+      '',
+      'More prose here.',
+    ].join('\n')
+
+    expect(parseDependencyDeclaration(body)).toEqual({
+      declared: false,
+      dependencies: [],
+    })
+  })
+
+  it('treats a block with no parsable reference and no "none" as undeclared', () => {
+    expect(parseDependencyDeclaration('Depends on: the sources milestone')).toEqual({
+      declared: false,
+      dependencies: [],
+    })
+  })
 })

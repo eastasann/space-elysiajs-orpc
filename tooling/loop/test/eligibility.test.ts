@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { parseDependencyDeclaration } from '../src/dependencies.ts'
 import {
   DEFAULT_SELECTION_POLICY,
   evaluateCandidates,
@@ -130,6 +131,44 @@ describe('fallback dependency map', () => {
     const result = selectNextIssue([issue({ number: 30 })], policy)
 
     expect(result.selected?.number).toBe(30)
+  })
+})
+
+describe('a prose Depends on block that names no issue', () => {
+  // The real text of issue #7: `Depends on **[M1.03] ...**.` names a
+  // milestone title, not a `#N`. Reproduces the bug in issue #48, then proves
+  // the fix: the fallback map's #7 -> #6 edge (already present in
+  // .github/loop-dependencies.json) now actually blocks the selector.
+  const body = [
+    '## Context',
+    '',
+    'Depends on **[M1.03] Expose sources through the oRPC contract**.',
+    '',
+    'This is the first real admin screen.',
+  ].join('\n')
+
+  it('parses to declared: false rather than "no dependencies"', () => {
+    expect(parseDependencyDeclaration(body)).toEqual({ declared: false, dependencies: [] })
+  })
+
+  it('falls through to the fallback map and blocks on the open dependency', () => {
+    const policy = { ...DEFAULT_SELECTION_POLICY, fallbackDependencies: { 7: [6] } }
+    const result = selectNextIssue([issue({ number: 6 }), issue({ number: 7, body })], policy)
+
+    expect(result.selected?.number).toBe(6)
+    const dependent = result.candidates.find((candidate) => candidate.issue.number === 7)
+    expect(dependent?.eligible).toBe(false)
+    expect(dependent?.dependencies).toEqual([{ number: 6, satisfied: false, detail: '#6 is open' }])
+  })
+
+  it('is eligible once the fallback dependency closes', () => {
+    const policy = { ...DEFAULT_SELECTION_POLICY, fallbackDependencies: { 7: [6] } }
+    const result = selectNextIssue(
+      [issue({ number: 6, state: 'closed' }), issue({ number: 7, body })],
+      policy,
+    )
+
+    expect(result.selected?.number).toBe(7)
   })
 })
 
