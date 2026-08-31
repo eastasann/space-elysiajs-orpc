@@ -12,14 +12,19 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --preload ./test/happydom.ts"
   },
   "peerDependencies": {
     "react": ">=19"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "20.12.0",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.3",
     "@types/bun": "1.3.11",
     "@types/react": "19.2.18",
-    "react": "19.2.8"
+    "@types/react-dom": "19.2.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   }
 }
