@@ -36,6 +36,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             </div>
             <nav className="nd-nav">
               <Link to="/">Dashboard</Link>
+              <Link to="/sources">Sources</Link>
             </nav>
           </header>
           {children}

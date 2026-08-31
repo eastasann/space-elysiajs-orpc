@@ -9,6 +9,10 @@
  */
 
 export type { ApiClient } from '@newsdeck/api-contract'
+/** Narrows a caught error to the typed oRPC error a contract declares, e.g. by `.code`. */
+export { isDefinedError, ORPCError } from '@orpc/client'
+/** Builds the same TanStack Query bindings `createApiClient` returns, from any client shape — a fake in tests, the real one in `createApiClient`. */
+export { createTanstackQueryUtils } from '@orpc/tanstack-query'
 export {
   type ApiClientBundle,
   type CreateApiClientOptions,
