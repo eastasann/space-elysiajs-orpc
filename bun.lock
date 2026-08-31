@@ -50,6 +50,7 @@
         "@newsdeck/jobs": "workspace:*",
         "@newsdeck/logger": "workspace:*",
         "@orpc/server": "1.15.0",
+        "drizzle-orm": "0.45.2",
         "elysia": "1.4.30",
         "zod": "4.5.4",
       },

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test'
+import type { ApiClient } from '@newsdeck/api-contract'
 import { createLocalAuthProvider, issueLocalToken } from '@newsdeck/auth'
 import { REQUEST_ID_HEADER } from '@newsdeck/logger'
+import { createORPCClient } from '@orpc/client'
+import { RPCLink } from '@orpc/client/fetch'
+import { createSourcesService } from '../src/modules/sources/service.ts'
+import type { ApiServer } from '../src/server.ts'
 import { buildServer } from '../src/server.ts'
+import { fakeSource, fakeSourcesRepository } from './support/fake-sources-repository.ts'
 import { fakeServices, fakeStatus, fakeSystemService, silentLogger } from './support/fakes.ts'
 
 const authOptions = {
@@ -12,12 +18,15 @@ const authOptions = {
 
 function serverWith(
   system = fakeSystemService({}),
-  overrides: { corsOrigins?: readonly string[] } = {},
+  overrides: {
+    corsOrigins?: readonly string[]
+    sources?: ReturnType<typeof createSourcesService>
+  } = {},
 ) {
   return buildServer({
     logger: silentLogger(),
     instanceId: 'api-test',
-    services: fakeServices(system),
+    services: fakeServices(system, overrides.sources),
     authProvider: createLocalAuthProvider(authOptions),
     corsOrigins: overrides.corsOrigins ?? [],
     startedAt: Date.now() - 12_000,
@@ -31,6 +40,15 @@ function rpcRequest(procedure: string, init: RequestInit = {}) {
     body: '{}',
     ...init,
   })
+}
+
+/** A typed oRPC client wired straight to the server's `handle`, no listener needed. */
+function clientFor(server: ApiServer): ApiClient {
+  const link = new RPCLink({
+    url: 'http://api.test/rpc',
+    fetch: (request) => server.handle(request),
+  })
+  return createORPCClient(link)
 }
 
 describe('GET /health', () => {
@@ -126,6 +144,69 @@ describe('oRPC surface', () => {
 
     expect(response.status).toBeGreaterThanOrEqual(500)
     expect(await response.text()).not.toContain('10.0.0.5')
+  })
+})
+
+describe('sources procedures', () => {
+  it('creates a source and lists it back', async () => {
+    const sources = createSourcesService(fakeSourcesRepository())
+    const client = clientFor(serverWith(undefined, { sources }))
+
+    const created = await client.sources.create({
+      name: 'Example Feed',
+      feedUrl: 'https://example.test/feed.xml',
+    })
+    expect(created.name).toBe('Example Feed')
+
+    const page = await client.sources.list({})
+    expect(page.items).toHaveLength(1)
+    expect(page.items[0]?.id).toBe(created.id)
+  })
+
+  it('rejects invalid input before it reaches the service', async () => {
+    const repository = fakeSourcesRepository()
+    const client = clientFor(serverWith(undefined, { sources: createSourcesService(repository) }))
+
+    await expect(client.sources.create({ name: '', feedUrl: 'not-a-url' })).rejects.toThrow()
+    expect(repository.rows).toHaveLength(0)
+  })
+
+  it('surfaces a duplicate feed url as a typed CONFLICT error, not a 500', async () => {
+    const existing = fakeSource({ feedUrl: 'https://example.test/feed.xml' })
+    const sources = createSourcesService(fakeSourcesRepository([existing]))
+    const client = clientFor(serverWith(undefined, { sources }))
+
+    await expect(
+      client.sources.create({ name: 'Duplicate', feedUrl: 'https://example.test/feed.xml' }),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      data: { feedUrl: 'https://example.test/feed.xml' },
+    })
+  })
+
+  it('surfaces an unknown id on update as a typed NOT_FOUND error, not a 500', async () => {
+    const sources = createSourcesService(fakeSourcesRepository())
+    const client = clientFor(serverWith(undefined, { sources }))
+
+    await expect(
+      client.sources.update({ id: '00000000-0000-0000-0000-000000000000', name: 'New Name' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('surfaces an unknown id on deactivate as a typed NOT_FOUND error, not a 500', async () => {
+    const sources = createSourcesService(fakeSourcesRepository())
+    const client = clientFor(serverWith(undefined, { sources }))
+
+    await expect(
+      client.sources.deactivate({ id: '00000000-0000-0000-0000-000000000000' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('returns null from get when the id does not exist', async () => {
+    const sources = createSourcesService(fakeSourcesRepository())
+    const client = clientFor(serverWith(undefined, { sources }))
+
+    expect(await client.sources.get({ id: '00000000-0000-0000-0000-000000000000' })).toBeNull()
   })
 })
 
