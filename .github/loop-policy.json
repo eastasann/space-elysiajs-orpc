@@ -1,14 +1,28 @@
 {
   "$comment": [
-    "Policy for the autonomous issue-to-merge loop. See docs/loop-engineering.md.",
+    "Policy for the fully unattended issue-to-merge loop. See",
+    "docs/loop-engineering.md#fully-unattended-mode.",
     "",
-    "This file is the single source of truth for risk classification and retry",
-    "limits. It is deliberately data, not code: a reviewer can audit the whole",
-    "merge policy by reading one file. It lives under .github/, which is itself",
-    "classified high risk, so changing the policy always requires human approval."
+    "The governing idea: risk decides HOW MUCH VERIFICATION a change must pass,",
+    "not WHETHER A HUMAN IS SUMMONED. All three tiers can merge automatically.",
+    "They differ only in what has to be true first.",
+    "",
+    "This file is data, not code, so a reviewer can audit the whole merge policy",
+    "by reading it. It is part of the control plane, so changing it is always",
+    "high risk, always dual-reviewed, and additionally checked for whether the",
+    "change WEAKENS a protection rather than merely altering one."
   ],
   "retry": {
-    "maxReviewAttempts": 3
+    "$comment": [
+      "Bounded per category. Exhausting one blocks that issue and the loop moves",
+      "to independent work \u2014 a single stuck issue is never a global stop."
+    ],
+    "maxReviewAttempts": 3,
+    "codingFixRounds": 3,
+    "reviewFixRounds": 3,
+    "ciFixRounds": 3,
+    "reviewerRetryRounds": 2,
+    "conflictRounds": 2
   },
   "risk": {
     "default": "low",
@@ -16,13 +30,18 @@
       "Every changed path is matched against every rule; the HIGHEST matching",
       "risk wins. Matching upward rather than by specificity means a new file",
       "under a sensitive directory is protected by default, and a mistake in a",
-      "pattern fails safe."
+      "pattern fails safe.",
+      "",
+      "AGENTS.md and docs/loop-engineering.md are deliberately NOT listed here.",
+      "They are handled by controlPlane.policySignals: a diff that changes what",
+      "the rules SAY is policy and goes high; a diff that corrects a command or",
+      "a path is documentation and goes medium."
     ],
     "paths": [
       {
         "risk": "high",
         "reason": "repository automation, CI, and merge policy",
-        "patterns": [".github/**", "tooling/loop/**"]
+        "patterns": [".github/**", "tooling/loop/**", "tooling/local-runner/**"]
       },
       {
         "risk": "high",
@@ -36,8 +55,8 @@
       },
       {
         "risk": "high",
-        "reason": "architecture invariants and agent instructions",
-        "patterns": ["AGENTS.md", "docs/architecture.md", "docs/adr/**", "docs/loop-engineering.md"]
+        "reason": "architecture invariants",
+        "patterns": ["docs/architecture.md", "docs/adr/**"]
       },
       {
         "risk": "high",
@@ -63,6 +82,11 @@
         ]
       },
       {
+        "risk": "medium",
+        "reason": "documentation that can carry policy (see controlPlane.policySignals)",
+        "patterns": ["AGENTS.md", "docs/loop-engineering.md", "docs/local-agent-runner.md"]
+      },
+      {
         "risk": "low",
         "reason": "documentation",
         "patterns": ["docs/**", "README.md", "*.md"]
@@ -79,11 +103,165 @@
       "publicContractGlobs": ["packages/api-contract/src/**"]
     }
   },
+  "tiers": {
+    "$comment": [
+      "Cumulative: medium inherits low, high inherits medium. A step with",
+      "`whenChanged` runs only when the diff touches something it could break.",
+      "A step with `requires` needs that tool on PATH \u2014 and if it is missing the",
+      "step is UNAVAILABLE, which blocks the issue. It is never counted as",
+      "passed, because 'could not check' and 'checked, fine' are different",
+      "answers and only one of them justifies a merge."
+    ],
+    "low": {
+      "reviewers": 1,
+      "steps": [
+        {
+          "name": "format",
+          "command": "bun",
+          "args": ["run", "format"],
+          "timeoutMinutes": 5
+        },
+        {
+          "name": "lint",
+          "command": "bun",
+          "args": ["run", "lint"],
+          "timeoutMinutes": 5
+        },
+        {
+          "name": "typecheck",
+          "command": "bun",
+          "args": ["run", "typecheck"],
+          "timeoutMinutes": 10
+        },
+        {
+          "name": "test",
+          "command": "bun",
+          "args": ["run", "test"],
+          "timeoutMinutes": 20
+        },
+        {
+          "name": "build",
+          "command": "bun",
+          "args": ["run", "build"],
+          "timeoutMinutes": 20
+        }
+      ]
+    },
+    "medium": {
+      "inherits": "low",
+      "reviewers": 1,
+      "steps": [
+        {
+          "name": "dependency-audit",
+          "command": "bun",
+          "args": ["install", "--frozen-lockfile", "--dry-run"],
+          "whenChanged": ["**/package.json", "bun.lock"],
+          "timeoutMinutes": 5
+        },
+        {
+          "name": "e2e",
+          "command": "bun",
+          "args": ["run", "test:e2e"],
+          "whenChanged": [
+            "apps/**",
+            "e2e/**",
+            "packages/api-contract/**",
+            "packages/api-client/**"
+          ],
+          "requires": "docker",
+          "timeoutMinutes": 30
+        }
+      ]
+    },
+    "high": {
+      "inherits": "medium",
+      "reviewers": 2,
+      "steps": [
+        {
+          "name": "docker-smoke",
+          "command": "bun",
+          "args": ["run", "docker:up"],
+          "whenChanged": ["infra/**", "docker-compose*.yml", "apps/**", "packages/db/**"],
+          "requires": "docker",
+          "timeoutMinutes": 30
+        },
+        {
+          "name": "load-balancing",
+          "command": "bun",
+          "args": ["run", "verify:lb"],
+          "whenChanged": ["infra/**", "docker-compose*.yml", "apps/api/**"],
+          "requires": "docker",
+          "timeoutMinutes": 10
+        },
+        {
+          "name": "migration",
+          "command": "bun",
+          "args": ["run", "db:migrate"],
+          "whenChanged": ["packages/db/**"],
+          "requires": "docker",
+          "timeoutMinutes": 15
+        },
+        {
+          "name": "loop-self-test",
+          "command": "bun",
+          "args": ["run", "--filter", "@newsdeck/loop", "test"],
+          "whenChanged": [".github/**", "tooling/loop/**", "tooling/local-runner/**"],
+          "timeoutMinutes": 10
+        }
+      ]
+    }
+  },
+  "controlPlane": {
+    "$comment": [
+      "The rules the loop uses to govern itself. A change here gets the full",
+      "treatment regardless of how small it looks, and is additionally checked",
+      "for whether it WEAKENS a protection.",
+      "",
+      "policySignals are matched against the ADDED AND REMOVED LINES of a diff,",
+      "not the file. That is what separates 'fix a stale command in AGENTS.md'",
+      "(medium, ordinary) from 'change what AGENTS.md says agents may merge'",
+      "(high, control plane). Case-insensitive."
+    ],
+    "patterns": [
+      ".github/workflows/**",
+      ".github/loop-policy.json",
+      ".github/loop-dependencies.json",
+      "tooling/loop/**",
+      "tooling/local-runner/src/orchestrator.ts",
+      "tooling/local-runner/src/github.ts",
+      "tooling/local-runner/prompts/**"
+    ],
+    "alwaysPolicy": [".github/loop-policy.json", ".github/workflows/loop-*.yml"],
+    "policySignals": [
+      "auto[- ]?merge",
+      "merge gate",
+      "required check",
+      "branch protection",
+      "ruleset",
+      "human approval",
+      "risk:(low|medium|high)",
+      "risk classification",
+      "blocking severity",
+      "permission[- ]?mode",
+      "allowedTools",
+      "bypassPermissions",
+      "force[- ]?push",
+      "must never",
+      "safety invariant",
+      "control plane",
+      "agent:(ready|blocked|in-progress|review)",
+      "reviewers"
+    ]
+  },
   "review": {
     "$comment": [
       "Findings at or above this severity block an automatic merge. Lower",
-      "severities are reported but do not hold the PR."
+      "severities are reported but do not hold the pull request.",
+      "",
+      "Reviewer count is per tier, under `tiers`. High risk takes two",
+      "independent passes with no shared session."
     ],
     "blockingSeverity": "high"
-  }
+  },
+  "requiredChecks": ["Lint and types", "Tests", "Build", "loop/risk-gate", "loop/review-gate"]
 }

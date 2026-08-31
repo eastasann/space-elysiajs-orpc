@@ -34,11 +34,44 @@ export interface SelectionPolicy {
    * retires its entry here. See docs/loop-engineering.md#issue-dependencies.
    */
   fallbackDependencies?: Readonly<Record<number, readonly number[]>>
+  /**
+   * Priority labels, most urgent first.
+   *
+   * Ordering is entirely from GitHub metadata: priority label, then issue
+   * number. Nothing here asks a model what to work on next — given the same
+   * backlog, two runners pick the same issue, which is what makes a claim race
+   * a rare collision rather than the normal case.
+   *
+   * An issue carrying none of these sorts after every issue that carries one,
+   * so a backlog with no priority labels falls back to issue order unchanged.
+   */
+  priorityLabels?: readonly string[]
+  /** Issues this run has already given up on. Skipped without re-reading. */
+  skip?: readonly number[]
 }
+
+export const DEFAULT_PRIORITY_LABELS = [
+  'priority:p0',
+  'priority:p1',
+  'priority:p2',
+  'priority:p3',
+] as const
 
 export const DEFAULT_SELECTION_POLICY: SelectionPolicy = {
   requiredLabel: 'agent:ready',
   excludedLabels: ['agent:in-progress', 'agent:review', 'agent:blocked'],
+  priorityLabels: DEFAULT_PRIORITY_LABELS,
+}
+
+/** Rank of an issue's priority label; unlabelled sorts last. */
+export function priorityRank(
+  labels: readonly string[],
+  priorityLabels: readonly string[] = DEFAULT_PRIORITY_LABELS,
+): number {
+  for (const [index, label] of priorityLabels.entries()) {
+    if (labels.includes(label)) return index
+  }
+  return priorityLabels.length
 }
 
 export interface SelectionResult {
@@ -72,6 +105,13 @@ export function evaluateCandidates(
         if (issue.labels.includes(excluded)) reasons.push(`carries \`${excluded}\``)
       }
 
+      // Issues this run already gave up on. They keep `agent:blocked` on
+      // GitHub, so this is belt and braces against re-selecting one before the
+      // label write lands.
+      if (policy.skip?.includes(issue.number) === true) {
+        reasons.push('already blocked earlier in this run')
+      }
+
       const declaration = parseDependencyDeclaration(issue.body)
       const effective = declaration.declared
         ? declaration.dependencies
@@ -97,13 +137,19 @@ export function evaluateCandidates(
 
       return { issue, eligible: reasons.length === 0, reasons, dependencies }
     })
-    .sort((a, b) => a.issue.number - b.issue.number)
+    .sort((a, b) => {
+      const byPriority =
+        priorityRank(a.issue.labels, policy.priorityLabels) -
+        priorityRank(b.issue.labels, policy.priorityLabels)
+      return byPriority !== 0 ? byPriority : a.issue.number - b.issue.number
+    })
 }
 
 /**
  * Pick the next issue for the coding agent.
  *
- * Lowest open issue number first, which follows the roadmap's dependency order.
+ * Highest priority label first, then lowest issue number, which follows the
+ * roadmap's dependency order.
  * Selection is advisory: the workflow must still claim the issue by applying
  * `agent:in-progress` and re-reading it, because GitHub offers no
  * compare-and-set on labels. See docs/loop-engineering.md.

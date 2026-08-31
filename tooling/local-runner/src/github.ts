@@ -17,11 +17,40 @@ import { redact } from './redact.ts'
 export type GhAvailability =
   | {
       available: false
-      reason: 'not-installed' | 'not-authenticated' | 'no-repository-access'
+      reason:
+        | 'not-installed'
+        | 'not-authenticated'
+        | 'no-repository-access'
+        | 'insufficient-permissions'
       remedy: string
       detail?: string
     }
-  | { available: true; account: string; repository: string }
+  | { available: true; account: string; repository: string; capabilities: Capabilities }
+
+/**
+ * What this credential can actually do to this repository.
+ *
+ * Read from `repos/{owner}/{name}`, which reports the authenticated user's
+ * permissions without mutating anything. Probing by attempting a write would
+ * leave litter in the issue tracker of a repository the runner may not even be
+ * cleared to work on.
+ */
+export interface Capabilities {
+  read: boolean
+  /** Covers creating branches, pushing, and opening pull requests. */
+  push: boolean
+  /** Covers labelling and commenting on issues. */
+  triage: boolean
+  admin: boolean
+}
+
+const CAPABILITY_SCHEMA = z.object({
+  pull: z.boolean().default(false),
+  push: z.boolean().default(false),
+  triage: z.boolean().default(false),
+  admin: z.boolean().default(false),
+  maintain: z.boolean().default(false),
+})
 
 export interface GhOptions {
   runner?: typeof run
@@ -84,18 +113,19 @@ export async function probeGh(options: GhOptions = {}): Promise<GhAvailability> 
       available: true,
       account: account.stdout.trim() || 'unknown',
       repository: '(unchecked)',
+      capabilities: { read: true, push: true, triage: true, admin: false },
     }
   }
 
-  // The narrowest call that proves read access, and cheap enough to make every
-  // run. Issue and pull request permissions are not separately probed — GitHub
-  // does not expose them without attempting a write — so a later failure is
-  // still possible; this catches the common case of no access at all.
-  const repository = await exec('gh', ['api', `repos/${options.repo}`, '--jq', '.full_name'], {
-    timeoutMs: 30_000,
-    cwd: options.cwd,
-    envProfile: 'github',
-  })
+  // One call that proves read access *and* reports what this credential may do,
+  // without mutating anything. Probing writes by attempting one would leave
+  // litter in the issue tracker of a repository the runner may not be cleared
+  // to work on.
+  const repository = await exec(
+    'gh',
+    ['api', `repos/${options.repo}`, '--jq', '{full_name: .full_name, permissions: .permissions}'],
+    { timeoutMs: 30_000, cwd: options.cwd, envProfile: 'github' },
+  )
   if (repository.code !== 0 || repository.stdout.trim() === '') {
     return {
       available: false,
@@ -105,10 +135,58 @@ export async function probeGh(options: GhOptions = {}): Promise<GhAvailability> 
     }
   }
 
+  const described = z
+    .object({ full_name: z.string(), permissions: CAPABILITY_SCHEMA.optional() })
+    .safeParse(safeJson(repository.stdout))
+
+  if (!described.success) {
+    return {
+      available: false,
+      reason: 'no-repository-access',
+      remedy: `\`gh\` returned a description of ${options.repo} the runner could not read.`,
+      detail: described.error.issues
+        .map((issue) => issue.message)
+        .join('; ')
+        .slice(0, 500),
+    }
+  }
+
+  const granted = described.data.permissions
+  const capabilities: Capabilities = {
+    read: granted?.pull ?? true,
+    push: granted?.push ?? false,
+    triage: (granted?.triage ?? false) || (granted?.push ?? false),
+    admin: granted?.admin ?? false,
+  }
+
+  // Claiming an issue the runner cannot later label, or building a branch it
+  // cannot push, wastes an agent invocation and leaves the backlog dirty. Both
+  // are cheap to rule out before any of that happens.
+  const missing: string[] = []
+  if (!capabilities.push) missing.push('push (branches and pull requests)')
+  if (!capabilities.triage) missing.push('triage (issue labels and comments)')
+
+  if (missing.length > 0) {
+    return {
+      available: false,
+      reason: 'insufficient-permissions',
+      remedy: `\`gh\` can read ${options.repo} as ${account.stdout.trim() || 'an unknown account'} but lacks: ${missing.join(', ')}. The loop needs both to claim an issue and open a pull request.`,
+    }
+  }
+
   return {
     available: true,
     account: account.stdout.trim() || 'unknown',
-    repository: repository.stdout.trim(),
+    repository: described.data.full_name,
+    capabilities,
+  }
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
   }
 }
 
@@ -155,13 +233,17 @@ export class GhError extends Error {
 }
 
 /**
- * A `gh` invocation bound to one repository.
+ * Everything the loop needs from GitHub, as an interface.
  *
- * `--repo owner/name` is passed explicitly everywhere rather than relying on
- * the current directory, because the runner works out of worktrees and a
- * mis-detected remote would act on the wrong repository.
+ * The orchestrator talks to this and never to a shell. That is what keeps the
+ * decision logic testable without a network, and what leaves room for another
+ * execution environment later — a sandbox that exposes GitHub through something
+ * other than the CLI implements this and changes nothing above it.
+ *
+ * `GhCliGitHubAdapter` is the one implementation, and the expected deployment
+ * is a normal machine with real `gh` repository access.
  */
-export interface GhClient {
+export interface GitHubAdapter {
   issues(labels: readonly string[]): Promise<GhIssue[]>
   issue(number: number): Promise<GhIssue>
   addLabels(issue: number, labels: readonly string[]): Promise<void>
@@ -172,7 +254,27 @@ export interface GhClient {
   pullRequestForBranch(branch: string): Promise<GhPullRequest | null>
   pullRequestComments(number: number): Promise<string[]>
   pullRequestDiff(number: number): Promise<string>
+  /**
+   * Ask GitHub to merge the pull request once its own required checks pass.
+   *
+   * Native auto-merge, deliberately: the runner states that the pull request is
+   * ready and GitHub decides whether it actually is. There is no code path here
+   * that merges anything, so a bug in the runner cannot produce a merge the
+   * repository ruleset would have refused.
+   */
+  enableAutoMerge(number: number): Promise<void>
+  /** Bring the pull request up to date with its base branch. */
+  updateBranch(number: number): Promise<void>
+  /** Re-run failed jobs for the checks on a pull request. */
+  rerunFailedChecks(number: number): Promise<void>
+  /** Whether the pull request is behind, conflicted, or clean. */
+  mergeability(number: number): Promise<Mergeability>
 }
+
+/** Retained for callers written before the interface was named. */
+export type GhClient = GitHubAdapter
+
+export type Mergeability = 'clean' | 'behind' | 'conflicted' | 'blocked' | 'unknown'
 
 export interface CreatePullRequestInput {
   base: string
@@ -189,7 +291,14 @@ export interface GhClientOptions {
   timeoutMs?: number
 }
 
-export function createGhClient(options: GhClientOptions): GhClient {
+/**
+ * The `gh` CLI implementation of {@link GitHubAdapter}.
+ *
+ * `--repo owner/name` is passed explicitly everywhere rather than relying on
+ * the current directory, because the runner works out of worktrees and a
+ * mis-detected remote would act on the wrong repository.
+ */
+export function createGhClient(options: GhClientOptions): GitHubAdapter {
   const exec = options.runner ?? run
   const timeoutMs = options.timeoutMs ?? 120_000
 
@@ -358,6 +467,63 @@ export function createGhClient(options: GhClientOptions): GhClient {
 
     async pullRequestDiff(number) {
       return gh(['pr', 'diff', String(number), '--repo', options.repo])
+    },
+
+    async enableAutoMerge(number) {
+      // `--squash` matches this repository's convention; `--auto` is the whole
+      // point — GitHub merges when *its* required checks pass, not when the
+      // runner says so.
+      await gh(['pr', 'merge', String(number), '--repo', options.repo, '--squash', '--auto'])
+    },
+
+    async updateBranch(number) {
+      await gh(['pr', 'update-branch', String(number), '--repo', options.repo])
+    },
+
+    async rerunFailedChecks(number) {
+      const raw = await gh([
+        'pr',
+        'view',
+        String(number),
+        '--repo',
+        options.repo,
+        '--json',
+        'statusCheckRollup',
+      ])
+
+      const parsed = parse(
+        z.object({
+          statusCheckRollup: z.array(z.object({ detailsUrl: z.string().nullish() })).nullish(),
+        }),
+        raw,
+        `checks on #${number}`,
+      )
+
+      const runIds = new Set<string>()
+      for (const check of parsed.statusCheckRollup ?? []) {
+        const match = /\/actions\/runs\/(\d+)/.exec(check.detailsUrl ?? '')
+        if (match?.[1] !== undefined) runIds.add(match[1])
+      }
+
+      for (const runId of runIds) {
+        // Best effort: a run that cannot be re-run is not worth stopping for.
+        await exec('gh', ['run', 'rerun', runId, '--repo', options.repo, '--failed'], {
+          cwd: options.cwd,
+          timeoutMs,
+          envProfile: 'github',
+        })
+      }
+    },
+
+    async mergeability(number) {
+      const pullRequest = await this.pullRequest(number)
+      const status = (pullRequest.mergeStateStatus ?? '').toUpperCase()
+
+      if (status === 'DIRTY') return 'conflicted'
+      if (status === 'BEHIND') return 'behind'
+      if (status === 'CLEAN' || status === 'HAS_HOOKS' || status === 'UNSTABLE') return 'clean'
+      if (status === 'BLOCKED') return 'blocked'
+      return 'unknown'
     },
   }
 }

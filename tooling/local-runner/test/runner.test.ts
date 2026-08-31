@@ -440,7 +440,7 @@ describe('F — a malformed review', () => {
 })
 
 describe('G — a high-risk change', () => {
-  test('is classified high and reported as a human gate', async () => {
+  test('is classified high, dual-reviewed, and merged without a person', async () => {
     const sandbox = await createSandbox()
     try {
       const gh = fakeGh({ issues: [issueFixture(12, 'Touch the loop')] })
@@ -464,7 +464,11 @@ describe('G — a high-risk change', () => {
       })
 
       expect(outcome.risk?.risk).toBe('high')
-      expect(outcome.detail).toContain('waits for a human')
+      // High risk no longer summons a person; it buys two independent reviews
+      // and the strongest verification, and then merges like anything else.
+      expect(outcome.status).toBe('opened')
+      expect(outcome.detail).toContain('auto-merge requested')
+      expect(gh.autoMerged).toEqual([100])
 
       const journal = await readJournal(join(sandbox.repository, '.loop', 'state.json'))
       expect(journal.runs[0]?.risk).toBe('high')
@@ -522,10 +526,13 @@ describe('G — a high-risk change', () => {
       })
 
       const [outcome] = await advance(deps)
-      expect(outcome?.action).toBe('awaiting-human')
-      expect(outcome?.detail).toContain('High risk')
-      // The runner has no merge call at all, so nothing merged.
-      expect(gh.calls.some((call) => call.includes('merge'))).toBe(false)
+
+      // The philosophy change: high risk is green and waiting on GitHub's own
+      // auto-merge, not on a person.
+      expect(outcome?.action).toBe('awaiting-merge')
+      expect(outcome?.detail).toContain('auto-merge')
+      // The runner still has no merge call of its own.
+      expect(gh.calls.some((call) => call.startsWith('merge('))).toBe(false)
     } finally {
       await sandbox.cleanup()
     }
@@ -811,7 +818,7 @@ describe('J — dry run', () => {
       expect(plan.selected?.number).toBe(30)
       expect(plan.branch).toBe('agent/issue-30-preview-me')
       expect(plan.worktree).toContain('.loop-worktrees')
-      expect(plan.verification).toContain('bun run test')
+      expect(plan.order.some((entry) => entry.issue === 30 && entry.eligible)).toBe(true)
 
       // Nothing was claimed, commented, created, or run.
       expect(gh.labelsOf(30)).toEqual(['agent:ready'])

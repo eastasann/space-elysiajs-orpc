@@ -35,9 +35,47 @@ const PathRuleSchema = z.object({
   patterns: z.array(z.string().min(1)).min(1),
 })
 
+/**
+ * A verification step, and the conditions under which it applies.
+ *
+ * `whenChanged` makes a step conditional on the diff actually touching
+ * something it could break — running the Docker smoke test for a documentation
+ * fix is waste, not rigour. `requires` names a tool that must be present:
+ * a step that cannot run is never counted as passed, because "we could not
+ * check" and "we checked and it was fine" are different answers.
+ */
+const TierStepSchema = z.object({
+  name: z.string().min(1),
+  command: z.string().min(1),
+  args: z.array(z.string()),
+  whenChanged: z.array(z.string().min(1)).optional(),
+  requires: z.string().min(1).optional(),
+  /** Minutes. Docker and E2E steps need far longer than a lint. */
+  timeoutMinutes: z.number().int().min(1).max(180).default(20),
+})
+export type TierStep = z.infer<typeof TierStepSchema>
+
+const TierSchema = z.object({
+  /** Risk tier whose steps run before these. Tiers are cumulative. */
+  inherits: RiskLevelSchema.optional(),
+  steps: z.array(TierStepSchema),
+  /** Independent review passes required at this tier. */
+  reviewers: z.number().int().min(1).max(4),
+})
+
 export const LoopPolicySchema = z.object({
   retry: z.object({
     maxReviewAttempts: z.number().int().min(1).max(10),
+    /** Implementation rounds spent on failing local verification. */
+    codingFixRounds: z.number().int().min(1).max(10).default(3),
+    /** Rounds spent addressing review findings. */
+    reviewFixRounds: z.number().int().min(1).max(10).default(3),
+    /** Rounds spent addressing failing CI. */
+    ciFixRounds: z.number().int().min(1).max(10).default(3),
+    /** Retries of a reviewer that returned unusable output. */
+    reviewerRetryRounds: z.number().int().min(1).max(5).default(2),
+    /** Attempts at resolving a merge conflict before blocking. */
+    conflictRounds: z.number().int().min(1).max(5).default(2),
   }),
   risk: z.object({
     default: RiskLevelSchema,
@@ -49,11 +87,72 @@ export const LoopPolicySchema = z.object({
       publicContractGlobs: z.array(z.string()),
     }),
   }),
+  /**
+   * How much verification each risk level demands.
+   *
+   * This is the whole of the autonomous model: risk decides *how hard the
+   * system checks its own work*, not whether a person is summoned. Every tier
+   * can auto-merge; they differ only in what has to be true first.
+   */
+  tiers: z.object({
+    low: TierSchema,
+    medium: TierSchema,
+    high: TierSchema,
+  }),
+  /**
+   * The rules the loop uses to govern itself.
+   *
+   * An autonomous system that can rewrite its own merge policy has no merge
+   * policy. Changes here are always high risk, always dual-reviewed, and are
+   * additionally checked for whether they *weaken* the protections rather than
+   * merely change them.
+   */
+  controlPlane: z.object({
+    patterns: z.array(z.string().min(1)).min(1),
+    /**
+     * Content patterns that turn a documentation file into policy.
+     *
+     * `AGENTS.md` is mostly prose about where files live; correcting a command
+     * in it is not a merge-policy change. A diff whose added or removed lines
+     * match one of these is treated as policy-bearing and gets the control
+     * plane's full treatment. Matching on the changed lines rather than the
+     * file means the distinction is deterministic and reviewable.
+     */
+    policySignals: z.array(z.string().min(1)),
+    /** Files that are policy no matter which lines changed. */
+    alwaysPolicy: z.array(z.string().min(1)),
+  }),
   review: z.object({
     blockingSeverity: SeveritySchema,
   }),
+  /** Checks GitHub must be enforcing. Removing one is weakening a protection. */
+  requiredChecks: z.array(z.string().min(1)).default([]),
 })
 export type LoopPolicy = z.infer<typeof LoopPolicySchema>
+
+/** Every step for a risk level, with inherited tiers first and no duplicates. */
+export function stepsForRisk(policy: LoopPolicy, risk: RiskLevel): TierStep[] {
+  const seen = new Set<string>()
+  const steps: TierStep[] = []
+
+  const collect = (level: RiskLevel): void => {
+    const tier = policy.tiers[level]
+    if (tier.inherits !== undefined && tier.inherits !== level) collect(tier.inherits)
+    for (const step of tier.steps) {
+      if (seen.has(step.name)) continue
+      seen.add(step.name)
+      steps.push(step)
+    }
+  }
+
+  collect(risk)
+  return steps
+}
+
+/** Independent review passes required at a risk level. */
+export function reviewersForRisk(policy: LoopPolicy, risk: RiskLevel): number {
+  return policy.tiers[risk].reviewers
+}
 
 export class PolicyError extends Error {
   constructor(issues: readonly string[]) {

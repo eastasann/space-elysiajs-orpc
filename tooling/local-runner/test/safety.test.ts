@@ -139,11 +139,21 @@ describe('the merge boundary', () => {
     expect(isAgentBranch('agent/main')).toBe(false)
   })
 
-  test('the runner ships no merge, force-push or ruleset call', async () => {
-    // A structural check on the package's own source: the safest merge path is
-    // one that does not exist.
+  test('the runner can request a merge but never perform one', async () => {
+    // A structural check on the package's own source. The runner is allowed to
+    // ask GitHub to auto-merge — that is the whole unattended design — but it
+    // must have no path that merges directly, forces a push, bypasses a
+    // protection, or edits a ruleset. The safest such path is one that does not
+    // exist, and this is what keeps it from being reintroduced.
     const files = new Bun.Glob('**/*.ts').scan({ cwd: `${import.meta.dir}/..`, absolute: true })
-    const forbidden = [/--force\b/, /['"]merge['"]/, /forceWithLease/, /rulesets/]
+    const forbidden = [
+      { pattern: /--force\b/, what: 'a force push' },
+      { pattern: /--admin\b/, what: 'an admin merge that bypasses protections' },
+      { pattern: /forceWithLease/, what: 'a force push' },
+      { pattern: /rulesets?\b/, what: 'a ruleset edit' },
+      { pattern: /branch(?:es)?\/protection/, what: 'a branch-protection edit' },
+      { pattern: /['"]PUT['"]/, what: 'a direct REST merge' },
+    ]
 
     for await (const file of files) {
       if (file.includes('/test/')) continue
@@ -155,14 +165,28 @@ describe('the merge boundary', () => {
           const trimmed = line.trim()
           return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'))
         })
-        // `git worktree remove --force` is the one legitimate use, and it is
-        // scoped to a directory this runner created.
+        // `git worktree remove --force` is the one legitimate `--force`, and it
+        // is scoped to a directory this runner created.
         .filter((line) => !line.includes("'worktree'"))
 
-      for (const pattern of forbidden) {
-        expect(code.filter((line) => pattern.test(line))).toEqual([])
+      for (const { pattern, what } of forbidden) {
+        const offending = code.filter((line) => pattern.test(line))
+        expect(offending, `${file} contains ${what}`).toEqual([])
       }
     }
+  })
+
+  test('the only merge call asks GitHub to decide', async () => {
+    const source = await Bun.file(`${import.meta.dir}/../src/github.ts`).text()
+    const mergeCalls = source
+      .split('\n')
+      .filter((line) => /'merge'/.test(line) && !line.trim().startsWith('//'))
+
+    expect(mergeCalls).toHaveLength(1)
+    // `--auto` is what makes it GitHub's decision rather than the runner's:
+    // GitHub merges when its own required checks pass, or never.
+    expect(mergeCalls[0]).toContain("'--auto'")
+    expect(mergeCalls[0]).toContain("'--squash'")
   })
 })
 
@@ -244,6 +268,13 @@ describe('github readiness', () => {
     },
   })
 
+  const DESCRIBE = 'api repos/owner/name --jq {full_name: .full_name, permissions: .permissions}'
+
+  const described = (permissions: Record<string, boolean>) => ({
+    code: 0,
+    stdout: JSON.stringify({ full_name: 'owner/name', permissions }),
+  })
+
   test('being logged in is not treated as having repository access', async () => {
     // The exact shape seen in a sandbox whose proxy served `gh api user` but
     // refused every repository call: authenticated, and useless.
@@ -251,7 +282,7 @@ describe('github readiness', () => {
       ...gh({
         'auth status': { code: 0, stdout: '' },
         'api user --jq .login': { code: 0, stdout: 'someone\n' },
-        'api repos/owner/name --jq .full_name': {
+        [DESCRIBE]: {
           code: 1,
           stdout: '',
           stderr: 'HTTP 403: GitHub access is not enabled for this session',
@@ -273,7 +304,7 @@ describe('github readiness', () => {
       ...gh({
         'auth status': { code: 0, stdout: '' },
         'api user --jq .login': { code: 0, stdout: 'someone\n' },
-        'api repos/owner/name --jq .full_name': { code: 0, stdout: 'owner/name\n' },
+        [DESCRIBE]: described({ pull: true, push: true, triage: true, admin: false }),
       }),
       repo: 'owner/name',
     })
@@ -282,6 +313,27 @@ describe('github readiness', () => {
     if (result.available) {
       expect(result.account).toBe('someone')
       expect(result.repository).toBe('owner/name')
+      expect(result.capabilities.push).toBe(true)
+    }
+  })
+
+  test('read-only access is refused before an issue is ever claimed', async () => {
+    // Claiming an issue this credential cannot label, or building a branch it
+    // cannot push, wastes an agent invocation and leaves the backlog dirty.
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        [DESCRIBE]: described({ pull: true, push: false, triage: false, admin: false }),
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) {
+      expect(result.reason).toBe('insufficient-permissions')
+      expect(result.remedy).toContain('push')
+      expect(result.remedy).toContain('triage')
     }
   })
 

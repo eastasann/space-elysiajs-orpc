@@ -8,6 +8,53 @@ function riskOf(files: Parameters<typeof diffOf>[0], labels: string[] = []): str
   return classifyRisk({ diff: diffOf(files), labels, policy }).risk
 }
 
+describe('AGENTS.md: content versus policy', () => {
+  // The distinction the first live run exposed. An issue whose acceptance
+  // criteria say "document this in AGENTS.md" should not be forced into the
+  // strongest tier by that alone.
+  it('is medium when the change is documentation', () => {
+    const assessment = classifyRisk({
+      diff: diffOf([
+        {
+          path: 'AGENTS.md',
+          added: ['Component tests live in each package’s `test/` directory.'],
+        },
+      ]),
+      labels: [],
+      policy: realPolicy(),
+    })
+
+    expect(assessment.risk).toBe('medium')
+    expect(assessment.controlPlane?.policyBearing).toBe(false)
+  })
+
+  it('is high when the change alters what the rules say', () => {
+    const assessment = classifyRisk({
+      diff: diffOf([
+        { path: 'AGENTS.md', added: ['A high-risk change may auto-merge without review.'] },
+      ]),
+      labels: [],
+      policy: realPolicy(),
+    })
+
+    expect(assessment.risk).toBe('high')
+    expect(assessment.controlPlane?.policyBearing).toBe(true)
+  })
+
+  it('is high when a removed line carried policy, not only an added one', () => {
+    const assessment = classifyRisk({
+      diff: diffOf([
+        { path: 'AGENTS.md', removed: ['Agents must never force-push a protected branch.'] },
+      ]),
+      labels: [],
+      policy: realPolicy(),
+    })
+
+    expect(assessment.risk).toBe('high')
+    expect(assessment.controlPlane?.policyBearing).toBe(true)
+  })
+})
+
 describe('path-based classification', () => {
   it.each([
     ['README.md', 'low'],
@@ -21,7 +68,6 @@ describe('path-based classification', () => {
     ['infra/proxy/nginx.conf', 'high'],
     ['docker-compose.yml', 'high'],
     ['packages/auth/src/providers/local.ts', 'high'],
-    ['AGENTS.md', 'high'],
     ['docs/architecture.md', 'high'],
     ['docs/adr/0004-authentication-abstraction.md', 'high'],
     ['.env.example', 'high'],

@@ -58,6 +58,7 @@ export {
   repositoryRoot,
 } from './git.ts'
 export {
+  type Capabilities,
   type ChecksVerdict,
   createGhClient,
   type GhAvailability,
@@ -65,6 +66,8 @@ export {
   GhError,
   type GhIssue,
   type GhPullRequest,
+  type GitHubAdapter,
+  type Mergeability,
   probeGh,
   summariseChecks,
 } from './github.ts'
