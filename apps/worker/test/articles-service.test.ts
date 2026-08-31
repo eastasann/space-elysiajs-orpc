@@ -257,6 +257,47 @@ describe('dedupeAndPersist', () => {
     })
   })
 
+  it('resolves a whole batch group as existing when only a non-representative member matches an existing row', async () => {
+    // groupA is a brand new url/hash and becomes the group's representative.
+    // groupB shares groupA's canonical_url (so it folds into groupA's group)
+    // but carries a content_hash that already exists in the database under a
+    // third, unrelated canonical_url — the database only proves the article
+    // via groupB's field, never groupA's own.
+    const existing = fakeArticle({
+      canonicalUrl: 'https://example.test/original',
+      contentHash: 'shared-hash',
+    })
+    const repository = fakeArticlesRepository([existing])
+    const service = createArticlesService(repository)
+    const groupA = fakeCandidate()
+    const groupB = fakeCandidate({
+      canonicalUrl: groupA.canonicalUrl,
+      contentHash: 'shared-hash',
+    })
+
+    const result = await service.dedupeAndPersist({
+      sourceId: 'source-1',
+      fetchedAt: new Date(),
+      candidates: [groupA, groupB],
+    })
+
+    expect(result.insertedCount).toBe(0)
+    expect(result.existingCount).toBe(1)
+    expect(result.duplicateInBatchCount).toBe(1)
+    expect(result.outcomes[0]?.outcome).toEqual({
+      status: 'existing',
+      reason: 'content-hash',
+      existingArticleId: existing.id,
+    })
+    expect(result.outcomes[1]?.outcome).toEqual({
+      status: 'duplicate-in-batch',
+      reason: 'canonical-url',
+      duplicateOfIndex: 0,
+    })
+    // Nothing should have been written — the group is entirely pre-existing.
+    expect(repository.rows).toHaveLength(1)
+  })
+
   it('reports a genuinely new candidate alongside duplicates without dropping either', async () => {
     const repository = fakeArticlesRepository()
     const service = createArticlesService(repository)

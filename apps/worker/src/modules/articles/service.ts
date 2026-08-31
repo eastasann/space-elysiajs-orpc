@@ -138,6 +138,40 @@ function findMatch(
   return null
 }
 
+/**
+ * A batch group can carry fields from more than one candidate — the
+ * representative that was actually collapsed onto may share its
+ * `canonical_url` with one group member and its `content_hash` with
+ * another (see `collapseInBatchDuplicates`). Checking only the
+ * representative's own fields against the database would miss a match
+ * proven by a non-representative member, so every member is checked.
+ */
+function findGroupMatch(
+  memberIndexes: number[],
+  candidates: ArticleCandidate[],
+  byCanonicalUrl: Map<string, ArticleMatch>,
+  byContentHash: Map<string, ArticleMatch>,
+): { match: ArticleMatch; reason: ArticleMatchReason } | null {
+  for (const memberIndex of memberIndexes) {
+    const candidate = candidates[memberIndex] as ArticleCandidate
+    const found = findMatch(candidate, byCanonicalUrl, byContentHash)
+    if (found !== null) return found
+  }
+  return null
+}
+
+/** Every representative index mapped to the full set of batch indexes folded into its group (including itself). */
+function groupMembersByRepresentative(
+  representativeIndexes: number[],
+  duplicates: Map<number, InBatchDuplicate>,
+): Map<number, number[]> {
+  const groups = new Map<number, number[]>(representativeIndexes.map((index) => [index, [index]]))
+  for (const [index, duplicate] of duplicates) {
+    groups.get(duplicate.duplicateOfIndex)?.push(index)
+  }
+  return groups
+}
+
 function toNewArticle(candidate: ArticleCandidate, sourceId: string, fetchedAt: Date): NewArticle {
   return {
     sourceId,
@@ -157,12 +191,15 @@ export function createArticlesService(repository: ArticlesRepository): ArticlesS
   return {
     async dedupeAndPersist({ sourceId, fetchedAt, candidates }) {
       const { representativeIndexes, duplicates } = collapseInBatchDuplicates(candidates)
+      const groups = groupMembersByRepresentative(representativeIndexes, duplicates)
 
       const matches = await repository.findMatches(
-        representativeIndexes.map((index) => {
-          const candidate = candidates[index] as ArticleCandidate
-          return { canonicalUrl: candidate.canonicalUrl, contentHash: candidate.contentHash }
-        }),
+        representativeIndexes.flatMap((index) =>
+          (groups.get(index) as number[]).map((memberIndex) => {
+            const candidate = candidates[memberIndex] as ArticleCandidate
+            return { canonicalUrl: candidate.canonicalUrl, contentHash: candidate.contentHash }
+          }),
+        ),
       )
       const byCanonicalUrl = new Map(matches.map((match) => [match.canonicalUrl, match]))
       const byContentHash = new Map(matches.map((match) => [match.contentHash, match]))
@@ -171,7 +208,12 @@ export function createArticlesService(repository: ArticlesRepository): ArticlesS
 
       for (const index of representativeIndexes) {
         const candidate = candidates[index] as ArticleCandidate
-        const found = findMatch(candidate, byCanonicalUrl, byContentHash)
+        const found = findGroupMatch(
+          groups.get(index) as number[],
+          candidates,
+          byCanonicalUrl,
+          byContentHash,
+        )
 
         if (found !== null) {
           resolved.set(index, {
