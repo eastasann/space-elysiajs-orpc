@@ -8,4 +8,5 @@
  * `test/boundary.test.ts` enforces the dependency allowlist.
  */
 export { type ApiClient, type Contract, contract } from './contract.ts'
+export * from './sources/index.ts'
 export * from './system/index.ts'

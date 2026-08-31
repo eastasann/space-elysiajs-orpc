@@ -75,7 +75,11 @@ describe('client-safety boundary', () => {
 
 describe('contract shape', () => {
   it('exposes the system namespace', () => {
-    expect(Object.keys(contract)).toEqual(['system'])
+    expect(Object.keys(contract)).toEqual(['system', 'sources'])
     expect(Object.keys(contract.system)).toEqual(['status'])
+  })
+
+  it('exposes the sources namespace', () => {
+    expect(Object.keys(contract.sources)).toEqual(['list', 'get', 'create', 'update', 'deactivate'])
   })
 })

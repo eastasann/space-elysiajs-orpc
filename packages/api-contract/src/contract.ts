@@ -1,8 +1,10 @@
 import type { ContractRouterClient } from '@orpc/contract'
+import { sourcesContract } from './sources/index.ts'
 import { systemContract } from './system/index.ts'
 
 export const contract = {
   system: systemContract,
+  sources: sourcesContract,
 }
 
 export type Contract = typeof contract
