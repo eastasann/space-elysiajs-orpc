@@ -18,6 +18,18 @@
       "outputs": [],
       "cache": false
     },
+    "@newsdeck/api#test": {
+      "dependsOn": ["^build", "@newsdeck/db#test"],
+      "env": ["TEST_DATABASE_URL", "TEST_REDIS_URL"],
+      "outputs": [],
+      "cache": false
+    },
+    "@newsdeck/worker#test": {
+      "dependsOn": ["^build", "@newsdeck/api#test"],
+      "env": ["TEST_DATABASE_URL", "TEST_REDIS_URL"],
+      "outputs": [],
+      "cache": false
+    },
     "dev": {
       "cache": false,
       "persistent": true
