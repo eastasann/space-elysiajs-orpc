@@ -162,6 +162,23 @@ A single failed issue is not a global stop.
 available again on its own the moment `#10` closes — GitHub remains the source
 of truth and nothing has to remember.
 
+An issue is blocked on two conditions, not one. The obvious one is a coding
+pass that ends badly. The other is a pass that ends *well* and produces
+nothing: the action reports `success` whenever the session finishes without
+throwing, which includes one that exhausted its turns having written no code.
+That is not a failure the action can see, so `loop-agent-dispatch` decides for
+itself — after the agent returns it looks for a branch named
+`agent/issue-<n>`, and an issue with no branch is treated as not finished
+whatever the conclusion said. Without that check the claim outlives the run
+and the issue is stranded as neither available nor in progress, which is the
+same outcome as a hard failure and was how #46 and #50 both stalled.
+
+Every agent run also uploads its own execution log as a run artifact, and puts
+its turn count and permission-denial count in the job summary. Those two
+numbers are what distinguish an agent that hit a ceiling from one that was
+refused the tools it needed, and both were unavailable while the log lived
+only in the runner's temp directory.
+
 ### Retry limits
 
 | Category | Default | Exhausting it |

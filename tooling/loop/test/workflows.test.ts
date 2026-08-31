@@ -750,3 +750,78 @@ describe('a job that starts another workflow may actually do so', () => {
     }
   })
 })
+
+describe('an agent that produces nothing does not keep the issue', () => {
+  // The action reports `success` whenever the session ends without throwing,
+  // which includes a session that ran out of turns having written nothing. The
+  // claim survived that, so the issue was excluded from selection with no
+  // branch to show and nothing running — #46 and #50 both went that way, after
+  // 7, 11 and 15 minute runs. Conclusion alone cannot distinguish the cases;
+  // whether a branch exists can.
+  const dispatch = workflows.find((w) => w.file === 'loop-agent-dispatch.yml')
+  const steps = dispatch?.doc.jobs?.dispatch?.steps ?? []
+  const stepNamed = (name: string) => steps.find((step) => step.name === name)
+
+  const cleanup = stepNamed('Report that the coding agent failed')
+  const outcome = steps.find((step) => step.id === 'outcome')
+
+  it('has a step that decides whether anything was produced', () => {
+    expect(outcome, 'a step with id `outcome`').toBeDefined()
+    expect(String(outcome?.with?.script ?? ''), 'it looks for the agent branch').toContain(
+      'listBranches',
+    )
+  })
+
+  it('answers that question even when the agent step failed', () => {
+    // Same trap as the cleanup step: no status function means `success()`, and
+    // then the check is skipped exactly when the run went wrong.
+    expect(outcome?.if ?? '').toMatch(/\balways\s*\(\s*\)/)
+  })
+
+  it('clears the claim when the agent succeeded but left no branch', () => {
+    // The condition has to react to the produced-nothing case, not only to a
+    // non-success conclusion. Comments are stripped so an explanation of the
+    // case does not read as the code handling it.
+    const condition = (cleanup?.if ?? '')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n')
+
+    expect(condition).toContain("steps.outcome.outputs.produced == 'false'")
+  })
+
+  it('still clears the claim on a hard failure', () => {
+    const condition = cleanup?.if ?? ''
+    expect(condition).toContain("steps.coding_agent.outputs.conclusion != 'success'")
+  })
+})
+
+describe('the agent run leaves an account of itself', () => {
+  // Three runs ended `success` with no output and there was no way to say what
+  // they spent their turns on: the agent writes its log to the runner's temp
+  // directory, which dies with the runner. An unattended loop that cannot
+  // explain a silent run cannot be debugged from outside. See #50.
+  const dispatch = workflows.find((w) => w.file === 'loop-agent-dispatch.yml')
+  const steps = dispatch?.doc.jobs?.dispatch?.steps ?? []
+
+  const upload = steps.find((step) => step.uses?.startsWith('actions/upload-artifact') === true)
+  const summarise = steps.find((step) => step.id === 'agent_log')
+
+  it('keeps the execution log beyond the run', () => {
+    expect(upload, 'an upload-artifact step').toBeDefined()
+    expect(String(upload?.with?.path ?? '')).toContain('claude-execution-output.json')
+  })
+
+  it('uploads it even when the agent failed', () => {
+    expect(upload?.if ?? '').toMatch(/\balways\s*\(\s*\)/)
+  })
+
+  it('surfaces the two numbers that explain a silent run', () => {
+    // `num_turns` says whether the agent hit a ceiling; `permission_denials_count`
+    // says whether it was refused. Both were absent from every record of the
+    // runs that stranded.
+    const script = String(summarise?.run ?? '')
+    expect(script).toContain('num_turns')
+    expect(script).toContain('permission_denials_count')
+  })
+})
