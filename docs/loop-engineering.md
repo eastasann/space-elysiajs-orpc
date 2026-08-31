@@ -354,7 +354,7 @@ flowchart TD
     decision -->|waiting| ci
     decision -->|human_approval_required| human["Human review\nrisk:high or fork"]
     human -->|approves| merge
-    decision -->|auto_merge| merge["GitHub auto-merge\n(squash)"]
+    decision -->|auto_merge| merge["Squash merge\n(auto-merge as fallback)"]
 
     merge --> merged["Issue closed\nloop labels cleared"]
     merged --> ready
@@ -371,7 +371,7 @@ function covered by [`test/scenarios.test.ts`](../tooling/loop/test/scenarios.te
 | Policy | [`.github/loop-policy.json`](../.github/loop-policy.json) | Risk rules and the retry limit, as data |
 | Dependencies | [`.github/loop-dependencies.json`](../.github/loop-dependencies.json) | Fallback dependency map for pre-existing issues |
 | Decision logic | `tooling/loop/src/` | Pure functions: risk, checks, gate, selection |
-| Pull request gate | `.github/workflows/loop-pr.yml` | Classify, review, publish gates, enable auto-merge |
+| Pull request gate | `.github/workflows/loop-pr.yml` | Classify, review, publish gates, merge and announce |
 | Next issue | `.github/workflows/loop-next-issue.yml` | Close out, select the next eligible issue |
 | Agent dispatch | `.github/workflows/loop-agent-dispatch.yml` | The boundary to a coding agent runner |
 | Bootstrap | `.github/workflows/loop-bootstrap.yml` | Create labels, print the manual settings |
@@ -582,11 +582,26 @@ enforces them — but the gate excludes them from its own required list. Waiting
 for a check it is about to publish would deadlock it at `waiting` forever, so a
 misconfigured `LOOP_REQUIRED_CHECKS` cannot cause that.
 
-When all of that holds, the workflow asks GitHub to enable **its own**
-auto-merge with a squash. It does not call the merge API. GitHub still enforces
-the ruleset, so a bug in this logic cannot merge a pull request the repository
-would otherwise refuse — the workflow can only ever *withhold* a merge, never
-force one.
+When all of that holds, a separate `merge` job squash-merges the pull request
+directly, and then tells `loop-next-issue` that it did.
+
+The ordering matters and is the opposite of what it was. Deferring to GitHub's
+own auto-merge means the merge happens later, in a run that raises no Actions
+event — GitHub raises none for anything `GITHUB_TOKEN` does — so the loop
+merged #40 and went silent: the issue stayed open and no next issue started.
+Merging here keeps the merge and its announcement in one run, where the
+announcement can be conditional on the merge having actually happened.
+
+Auto-merge is still the fallback for a pull request with something genuinely
+outstanding, and a merge it completes cannot be announced by that run. The job
+therefore waits briefly for it before giving up, and says so in the log if it
+does; every tracked check is already green by the time the job runs, so this
+path is reached only for a stale `mergeable_state` or a required check the loop
+does not track.
+
+GitHub still enforces the ruleset either way. It refuses a merge that is not
+fully green, and the job reports the refusal rather than retrying or forcing it,
+so a bug here can withhold a merge but never force one.
 
 ### Why squash
 

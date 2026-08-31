@@ -54,7 +54,12 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Close out the merged issue
-        if: github.event_name == 'push'
+        # Both events, and the second one is the important one. A merge the loop
+        # performs raises no push event, so the gate dispatches this workflow
+        # instead — and gating this step on `push` alone would mean it never ran
+        # on the one path that matters, leaving the shipped issue open exactly
+        # as #4 was. The two halves of that fix have to agree on the trigger.
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/github-script@v7
         with:
           script: |
@@ -78,14 +83,40 @@ jobs:
             }
 
             const issue_number = Number(closes[1])
-            // GitHub closes the issue itself when the pull request declares it.
-            // All that is left is to clear the loop's own lifecycle labels.
+
+            // This used to assume GitHub had already closed the issue, because
+            // the pull request declares it. Issue #4 shows the assumption does
+            // not hold: #40 merged carrying "Closes #4" and #4 stayed open, so
+            // the loop reported an issue shipped while its own backlog still
+            // listed it as in flight. An unattended loop must not depend on a
+            // side effect it never checks.
+            //
+            // Closing is idempotent, so doing it when GitHub already has costs
+            // one API call and nothing else.
+            //
+            // Guarded because `Closes #N` is written by whoever opened the pull
+            // request and need not point at anything: a stale or mistyped number
+            // makes `issues.get` throw a 404. This step has no
+            // `continue-on-error`, and the steps that select and dispatch the
+            // next issue default to `if: success()`, so an unguarded throw here
+            // would stop the whole backlog over one bad reference — a worse
+            // stall than the one this block exists to prevent.
+            try {
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number })
+              if (issue.state === 'open') {
+                await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' })
+                core.notice(`Closed #${issue_number} (shipped by #${merged.number}).`)
+              }
+            } catch (error) {
+              core.warning(`Could not close #${issue_number}: ${error.message}`)
+            }
+
             for (const label of ['agent:ready', 'agent:in-progress', 'agent:review', 'agent:blocked']) {
               await github.rest.issues
                 .removeLabel({ owner, repo, issue_number, name: label })
                 .catch(() => {})
             }
-            core.notice(`Cleared loop labels on #${issue_number} (shipped by #${merged.number}).`)
+            core.notice(`Cleared loop labels on #${issue_number}.`)
 
       - name: Read the backlog
         uses: actions/github-script@v7

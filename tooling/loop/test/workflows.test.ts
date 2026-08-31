@@ -481,3 +481,272 @@ describe('cleanup steps run when the thing they clean up after fails', () => {
     }
   })
 })
+
+describe('an approved pull request does not stall behind its base', () => {
+  // Every merge moves the default branch, so in a loop that merges repeatedly a
+  // pull request is routinely behind by the time it is approved, and the
+  // ruleset requires it to be current. #36 and #40 both stalled at `behind`
+  // with every check green and nothing bringing them forward.
+  const mergeStep = workflows
+    .filter((w) => w.file === 'loop-pr.yml')
+    .flatMap(({ doc }) => Object.values(doc.jobs ?? {}))
+    .flatMap((job) => job.steps ?? [])
+    .find((step) => String(step.with?.script ?? '').includes('enablePullRequestAutoMerge'))
+
+  const script = String(mergeStep?.with?.script ?? '')
+
+  it('has a step that asks GitHub to merge', () => {
+    expect(script).not.toBe('')
+  })
+
+  it('brings a stale branch forward rather than waiting', () => {
+    expect(script).toContain("mergeable_state === 'behind'")
+    expect(script).toContain('updateBranch')
+  })
+
+  // Updating the branch pushes a merge commit, so the head that eventually
+  // merges is not the head that was reviewed. Returning after the update is
+  // what sends it back through CI and this gate.
+  it('re-runs the gate on the updated head instead of merging it unreviewed', () => {
+    // Comments stripped first. Without that, `indexOf('updateBranch')` matched
+    // the explanation above the call and `indexOf('return')` matched the word
+    // "returns" inside that same comment, so the assertion held no matter what
+    // the code did — this test passed with the safety return deleted, which is
+    // the one regression it exists to catch.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const afterUpdate = code.slice(code.indexOf('updateBranch'))
+    const nextReturn = afterUpdate.indexOf('return')
+    const nextMerge = afterUpdate.indexOf('pulls.merge')
+
+    expect(afterUpdate, 'the call is present in code, not just prose').toContain('updateBranch')
+    expect(nextMerge, 'and a merge call follows it').toBeGreaterThanOrEqual(0)
+    expect(nextReturn).toBeGreaterThanOrEqual(0)
+    expect(nextReturn, 'must return before any merge call').toBeLessThan(nextMerge)
+  })
+})
+
+describe('the loop keeps going after it merges something', () => {
+  // GitHub raises no workflow events for anything GITHUB_TOKEN does, and that
+  // covers a merge this loop performs and a merge GitHub completes for an
+  // auto-merge the loop enabled. #40 merged and produced no loop-next-issue
+  // run at all, so its issue was never closed and no next issue was selected.
+  // `workflow_dispatch` is exempt, so the merge step has to say so out loud.
+  const mergeStep = workflows
+    .filter((w) => w.file === 'loop-pr.yml')
+    .flatMap(({ doc }) => Object.entries(doc.jobs ?? {}))
+    .flatMap(([job, spec]) => (spec.steps ?? []).map((step) => ({ job, spec, step })))
+    .find(({ step }) => String(step.with?.script ?? '').includes('enablePullRequestAutoMerge'))
+
+  const script = String(mergeStep?.step.with?.script ?? '')
+
+  it('finds the merge step', () => {
+    expect(script).not.toBe('')
+  })
+
+  it('tells loop-next-issue that a merge happened', () => {
+    expect(script).toContain('createWorkflowDispatch')
+    expect(script).toContain('loop-next-issue.yml')
+  })
+
+  // A reviewer caught the deferred path: when auto-merge completes the merge
+  // later, the next gate run hits `if (pr.merged)` and returned there, above
+  // the dispatch, so that merge was never announced. Both endings that leave a
+  // merged pull request have to reach the same announcement.
+  it('announces a merge an earlier run deferred', () => {
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const merged = code.indexOf('if (pr.merged)')
+    expect(merged, 'the already-merged branch exists').toBeGreaterThanOrEqual(0)
+
+    const branch = code.slice(merged, code.indexOf('return', merged))
+    expect(branch, 'and announces before returning').toContain('announce()')
+  })
+
+  it('holds the actions permission that dispatch needs', () => {
+    const permissions = mergeStep?.spec.permissions as Record<string, string> | undefined
+    expect(permissions?.actions).toBe('write')
+  })
+
+  // A reviewer traced the race: GitHub's auto-merge reacts to the same check
+  // event and finishes before a fresh Actions run can start, so this run's own
+  // merge call can fail with "already merged". Reading that as "still pending"
+  // enables auto-merge as a no-op and returns without announcing.
+  it('announces a merge that beat this run to it', () => {
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const at = code.indexOf('if (!merged)')
+    const branch = code.slice(at, code.indexOf('\n}', at))
+
+    expect(branch, 're-reads the pull request').toContain('pulls.get')
+    expect(branch, 'and announces when it turns out merged').toContain('announce()')
+  })
+
+  it('only announces a merge that actually happened', () => {
+    // The unmerged path must return without announcing, or the loop would move
+    // on from an issue it never shipped. Asserted against the branch itself
+    // rather than the position of the dispatch call, which now lives in a
+    // helper at the top of the script and so precedes every branch.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const at = code.indexOf('if (!merged)')
+    expect(at, 'the unmerged branch exists').toBeGreaterThanOrEqual(0)
+
+    // The YAML block scalar is de-indented when parsed, so the branch closes on
+    // a brace at column zero, not at the indentation seen in the file.
+    const branch = code.slice(at, code.indexOf('\n}', at))
+    expect(branch, 'it returns').toContain('return')
+
+    // The branch announces only on a confirmed merge. It has three endings —
+    // the pull request turned out already merged, auto-merge completed it while
+    // this job waited, or it is still pending — and the first two announce.
+    // What must never happen is an announcement with no merge behind it, so
+    // every `announce()` here has to sit after a `.merged` check.
+    for (const [before] of branch.matchAll(/([\s\S]*?)announce\(\)/g)) {
+      expect(before, 'every announcement follows a merged check').toContain('.merged')
+    }
+  })
+
+  // Both reviewers on #42 caught this: the dispatch sat only after the direct
+  // merge, while the auto-merge branch returned before ever reaching it. So a
+  // merge GitHub completed later went unannounced — the exact #40 stall the
+  // code claimed to fix. Deferring the merge and announcing it in the same run
+  // are incompatible, so the direct merge has to come first.
+  it('merges directly before falling back to auto-merge', () => {
+    const direct = script.indexOf('pulls.merge')
+    const deferred = script.indexOf('enablePullRequestAutoMerge')
+
+    expect(direct).toBeGreaterThanOrEqual(0)
+    expect(direct, 'the announceable path is attempted first').toBeLessThan(deferred)
+  })
+
+  // updateBranch was the only unguarded write in the step. A 422 from a moved
+  // head would throw, failing the job and leaving the pull request stalled
+  // behind with a red run as the only symptom.
+  it('guards every write against a refusal', () => {
+    // Each write is followed by a catch before the next one begins, so a
+    // refusal degrades to a warning instead of failing the job.
+    // `createWorkflowDispatch` was missing from this list, and a reviewer
+    // caught it: it is the last write before the loop moves on, and it runs
+    // after the merge, so throwing there fails the job without undoing
+    // anything and nothing retries — the same stall, one call downstream.
+    for (const call of [
+      'updateBranch',
+      'pulls.merge',
+      'enablePullRequestAutoMerge',
+      'createWorkflowDispatch',
+    ]) {
+      const at = script.indexOf(call)
+      expect(at, `${call} is present`).toBeGreaterThanOrEqual(0)
+      expect(script.slice(at), `${call} is followed by a catch`).toContain('} catch')
+    }
+
+    // Four writes, four guards.
+    const catches = script.match(/\}\s*catch/g) ?? []
+    expect(catches.length).toBeGreaterThanOrEqual(4)
+  })
+})
+
+describe('a shipped issue is actually closed', () => {
+  const closeOut = workflows
+    .filter((w) => w.file === 'loop-next-issue.yml')
+    .flatMap(({ doc }) => Object.values(doc.jobs ?? {}))
+    .flatMap((job) => job.steps ?? [])
+    .find((step) => step.name === 'Close out the merged issue')
+
+  const script = String(closeOut?.with?.script ?? '')
+
+  it('finds the close-out step', () => {
+    expect(script).not.toBe('')
+  })
+
+  // It used to clear labels and trust GitHub's "Closes #N" to do the closing.
+  // #40 merged carrying "Closes #4" and #4 stayed open, so the loop called an
+  // issue shipped while its backlog still listed it as in flight.
+  it('closes the issue rather than assuming GitHub did', () => {
+    expect(script).toContain("state: 'closed'")
+  })
+
+  // A reviewer caught the two halves not composing: a merge the loop performs
+  // raises no push event, so the gate dispatches this workflow instead — and
+  // the step was gated on `push` alone, so it never ran on the one path that
+  // matters. Closing the issue and announcing the merge have to agree on the
+  // trigger or neither is worth anything.
+  it('runs on the dispatch the merge job actually sends', () => {
+    const condition = closeOut?.if ?? ''
+
+    expect(condition).toContain("github.event_name == 'workflow_dispatch'")
+    expect(condition, 'and still on a human push').toContain("github.event_name == 'push'")
+  })
+
+  // `Closes #N` is written by whoever opened the pull request and need not
+  // point at anything. This step has no continue-on-error and the selection
+  // steps default to `if: success()`, so an unguarded 404 would stop the whole
+  // backlog over one bad reference.
+  it('does not let a bad issue reference halt the backlog', () => {
+    // Comments stripped first: the explanation above the lookup names
+    // `issues.get`, and matching that instead of the call put the search
+    // before the guard rather than inside it.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const at = code.indexOf('issues.get')
+    expect(at).toBeGreaterThanOrEqual(0)
+
+    // The `try` has to open just before the lookup. Asserting only that a
+    // `} catch` appears somewhere after it passes even when the `try` is gone
+    // and the catch is left orphaned, which is how the first version of this
+    // test missed the regression it was written for.
+    // Ordering rather than proximity: the last `try` before the lookup must
+    // open after the last `catch` closed, so the lookup is inside a live guard.
+    // Proximity breaks on the explanatory comment that sits between them.
+    const before = code.slice(0, at)
+    expect(before.lastIndexOf('try {'), 'the lookup sits inside a try').toBeGreaterThan(
+      before.lastIndexOf('} catch'),
+    )
+    expect(code.slice(at), 'and a catch follows').toContain('} catch')
+  })
+})
+
+describe('a job that starts another workflow may actually do so', () => {
+  // Two steps in this loop dispatch a workflow, and both failed the same way
+  // before this lint existed: "Resource not accessible by integration", because
+  // `createWorkflowDispatch` needs `actions: write` and the job granted `read`.
+  // The gate could therefore never request a fix round, so a review that asked
+  // for changes went nowhere (#43), and the merge step could not tell
+  // loop-next-issue that a merge had happened (#40).
+  const dispatchers = workflows.flatMap(({ file, doc }) =>
+    Object.entries(doc.jobs ?? {})
+      .filter(([, job]) =>
+        (job.steps ?? []).some((step) =>
+          String(step.with?.script ?? '').includes('createWorkflowDispatch'),
+        ),
+      )
+      .map(([name, job]) => ({ file, name, job })),
+  )
+
+  it('finds the jobs that dispatch a workflow', () => {
+    expect(dispatchers.length).toBeGreaterThan(0)
+  })
+
+  it('grants actions: write wherever a workflow is dispatched', () => {
+    for (const { file, name, job } of dispatchers) {
+      const permissions = job.permissions as Record<string, string> | undefined
+      expect(permissions?.actions, `${file}#${name}`).toBe('write')
+    }
+  })
+})
