@@ -28,10 +28,14 @@ export interface SelectionPolicy {
   /** Any of these present means the issue is already claimed or held. */
   excludedLabels: readonly string[]
   /**
-   * Dependencies for issues whose body declares none, keyed by issue number.
+   * Dependencies for issues whose body does not answer the question, keyed by
+   * issue number.
    *
-   * A body always wins: adopting the `Depends on:` convention on an issue
-   * retires its entry here. See docs/loop-engineering.md#issue-dependencies.
+   * A body always wins once it does answer: naming a `#N` reference, or
+   * writing `Depends on: none`, retires that issue's entry here. A block that
+   * names nothing parsable — prose without an issue reference — has not
+   * answered, so this map is still consulted. See
+   * docs/loop-engineering.md#issue-dependencies.
    */
   fallbackDependencies?: Readonly<Record<number, readonly number[]>>
   /**

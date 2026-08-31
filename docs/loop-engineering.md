@@ -448,14 +448,22 @@ stall issues. An issue is eligible only when every declared dependency is
 **closed**. A dependency the loop cannot see — a wrong number, a deleted issue —
 counts as unsatisfied, because unverifiable must never mean satisfied.
 
+A block that names no `#N` reference and does not say `none` — prose such as
+`Depends on **[M1.03] Expose sources through the oRPC contract**.`, naming a
+milestone rather than an issue — has not actually answered the question. It is
+treated the same as a body with no block at all: the fallback map below is
+still consulted. `Depends on: none` is the only way to say "checked, nothing
+blocks this" without naming a reference.
+
 ### The fallback map
 
 [`.github/loop-dependencies.json`](../.github/loop-dependencies.json) carries
 dependencies for the issues written **before** this convention existed.
 
-An issue's own body always wins: a `Depends on` block — including `Depends on:
-none` — retires that issue's entry in the map. The map is consulted only when a
-body has no block at all.
+An issue's own body always wins once it names a `#N` reference or says
+`Depends on: none` — either retires that issue's entry in the map. The map is
+consulted whenever a body has no block, or a block that names nothing
+parsable.
 
 It exists because rewriting those issue bodies through the available GitHub API
 turned out to be lossy: it HTML-escapes quotes and strips autolinks. Damaging 27
