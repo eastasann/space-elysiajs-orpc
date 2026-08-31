@@ -20,9 +20,13 @@ export {
   type HeartbeatPayload,
   heartbeatJob,
   type JobDefinition,
+  SOURCES_FETCH_JOB_OPTIONS,
+  type SourcesFetchPayload,
   SYSTEM_QUEUE_NAME,
+  sourcesFetchJob,
 } from './definitions.ts'
 export { type RedisEnv, redisEnvSchema, type WorkerQueueEnv, workerQueueEnvSchema } from './env.ts'
+export { UnrecoverableError } from './errors.ts'
 export {
   publishWorkerHeartbeat,
   readWorkerHeartbeat,

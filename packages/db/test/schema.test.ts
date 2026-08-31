@@ -83,6 +83,16 @@ describe('sources table', () => {
       'is_active',
     ])
   })
+
+  it('allows fetch bookkeeping columns to start empty', () => {
+    const { columns } = getTableConfig(sources)
+    const bookkeeping = ['etag', 'last_modified', 'last_fetched_at', 'last_error']
+
+    for (const name of bookkeeping) {
+      const column = columns.find((candidate) => candidate.name === name)
+      expect(column?.notNull).toBe(false)
+    }
+  })
 })
 
 describe('categories table', () => {

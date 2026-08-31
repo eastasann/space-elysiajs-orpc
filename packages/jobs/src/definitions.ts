@@ -1,3 +1,4 @@
+import type { JobsOptions } from 'bullmq'
 import { z } from 'zod'
 
 /**
@@ -35,4 +36,32 @@ export type HeartbeatPayload = z.infer<typeof HeartbeatPayloadSchema>
 export const heartbeatJob: JobDefinition<HeartbeatPayload> = {
   name: 'system.heartbeat',
   payloadSchema: HeartbeatPayloadSchema,
+}
+
+const SourcesFetchPayloadSchema = z.object({
+  /** The source to fetch. */
+  sourceId: z.string().min(1),
+  /** Correlation id of whatever caused the job, when there is one. */
+  requestId: z.string().optional(),
+})
+export type SourcesFetchPayload = z.infer<typeof SourcesFetchPayloadSchema>
+
+/**
+ * Fetches one source's feed document.
+ *
+ * The first stage of the ingestion pipeline described in
+ * `docs/architecture.md#background-worker`. A transient failure (timeout,
+ * 5xx, connection reset) should exhaust these attempts before the job moves to
+ * the failed set; a permanent one (404, 410, an invalid or refused URL) is
+ * raised as `UnrecoverableError` by the handler and skips the remaining
+ * attempts regardless of this setting.
+ */
+export const SOURCES_FETCH_JOB_OPTIONS: JobsOptions = {
+  attempts: 5,
+  backoff: { type: 'exponential', delay: 30_000 },
+}
+
+export const sourcesFetchJob: JobDefinition<SourcesFetchPayload> = {
+  name: 'sources.fetch',
+  payloadSchema: SourcesFetchPayloadSchema,
 }
