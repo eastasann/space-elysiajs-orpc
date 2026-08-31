@@ -606,6 +606,48 @@ describe('a shipped issue is actually closed', () => {
   it('closes the issue rather than assuming GitHub did', () => {
     expect(script).toContain("state: 'closed'")
   })
+
+  // A reviewer caught the two halves not composing: a merge the loop performs
+  // raises no push event, so the gate dispatches this workflow instead — and
+  // the step was gated on `push` alone, so it never ran on the one path that
+  // matters. Closing the issue and announcing the merge have to agree on the
+  // trigger or neither is worth anything.
+  it('runs on the dispatch the merge job actually sends', () => {
+    const condition = closeOut?.if ?? ''
+
+    expect(condition).toContain("github.event_name == 'workflow_dispatch'")
+    expect(condition, 'and still on a human push').toContain("github.event_name == 'push'")
+  })
+
+  // `Closes #N` is written by whoever opened the pull request and need not
+  // point at anything. This step has no continue-on-error and the selection
+  // steps default to `if: success()`, so an unguarded 404 would stop the whole
+  // backlog over one bad reference.
+  it('does not let a bad issue reference halt the backlog', () => {
+    // Comments stripped first: the explanation above the lookup names
+    // `issues.get`, and matching that instead of the call put the search
+    // before the guard rather than inside it.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const at = code.indexOf('issues.get')
+    expect(at).toBeGreaterThanOrEqual(0)
+
+    // The `try` has to open just before the lookup. Asserting only that a
+    // `} catch` appears somewhere after it passes even when the `try` is gone
+    // and the catch is left orphaned, which is how the first version of this
+    // test missed the regression it was written for.
+    // Ordering rather than proximity: the last `try` before the lookup must
+    // open after the last `catch` closed, so the lookup is inside a live guard.
+    // Proximity breaks on the explanatory comment that sits between them.
+    const before = code.slice(0, at)
+    expect(before.lastIndexOf('try {'), 'the lookup sits inside a try').toBeGreaterThan(
+      before.lastIndexOf('} catch'),
+    )
+    expect(code.slice(at), 'and a catch follows').toContain('} catch')
+  })
 })
 
 describe('a job that starts another workflow may actually do so', () => {
