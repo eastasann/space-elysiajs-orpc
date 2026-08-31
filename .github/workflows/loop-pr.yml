@@ -16,6 +16,15 @@ name: Loop - pull request gate
 #      command. Untrusted values reach `bun` only through files and through
 #      `actions/github-script` variables, never through `${{ }}` inside `run:`.
 #
+# Exactly one job, `merge`, holds `contents: write` — asking GitHub to finish a
+# pull request needs it. It is safe by construction rather than by convention:
+# it checks nothing out, so it has no working tree and no repository code to
+# run, it has no shell step, and every step is `actions/github-script`. It acts
+# only on a `decision` computed by the `gate` job from trusted state. The job
+# that checks out the repository and runs the review agent stays read-only, and
+# `tooling/loop/test/workflows.test.ts` fails the build if either half of that
+# split is given away.
+#
 # A pull request from a fork is evaluated but never merged automatically; the
 # gate reports `human_approval_required` for it.
 #
@@ -538,6 +547,23 @@ jobs:
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number })
             if (pr.merged) {
               core.info('Already merged.')
+              return
+            }
+
+            // Every merge moves the default branch, so in a loop that merges
+            // repeatedly a pull request opened minutes ago is routinely behind
+            // by the time it is approved, and the ruleset requires it to be
+            // current. Nothing else brings it forward, so an approved change
+            // would sit at `behind` indefinitely: #36 and #40 both did.
+            //
+            // This is the one place the loop writes to a branch, and it can
+            // only write one thing: GitHub merging this pull request's own base
+            // into its head. It cannot introduce content, and the push restarts
+            // CI and this gate, so the updated head is reviewed again before
+            // anything merges. Returning here is what makes that happen.
+            if (pr.mergeable_state === 'behind') {
+              await github.rest.pulls.updateBranch({ owner, repo, pull_number })
+              core.info('Branch was behind the base; updated it. CI and the gate will run again.')
               return
             }
 

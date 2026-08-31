@@ -481,3 +481,38 @@ describe('cleanup steps run when the thing they clean up after fails', () => {
     }
   })
 })
+
+describe('an approved pull request does not stall behind its base', () => {
+  // Every merge moves the default branch, so in a loop that merges repeatedly a
+  // pull request is routinely behind by the time it is approved, and the
+  // ruleset requires it to be current. #36 and #40 both stalled at `behind`
+  // with every check green and nothing bringing them forward.
+  const mergeStep = workflows
+    .filter((w) => w.file === 'loop-pr.yml')
+    .flatMap(({ doc }) => Object.values(doc.jobs ?? {}))
+    .flatMap((job) => job.steps ?? [])
+    .find((step) => String(step.with?.script ?? '').includes('enablePullRequestAutoMerge'))
+
+  const script = String(mergeStep?.with?.script ?? '')
+
+  it('has a step that asks GitHub to merge', () => {
+    expect(script).not.toBe('')
+  })
+
+  it('brings a stale branch forward rather than waiting', () => {
+    expect(script).toContain("mergeable_state === 'behind'")
+    expect(script).toContain('updateBranch')
+  })
+
+  // Updating the branch pushes a merge commit, so the head that eventually
+  // merges is not the head that was reviewed. Returning after the update is
+  // what sends it back through CI and this gate.
+  it('re-runs the gate on the updated head instead of merging it unreviewed', () => {
+    const afterUpdate = script.slice(script.indexOf('updateBranch'))
+    const nextReturn = afterUpdate.indexOf('return')
+    const nextMerge = afterUpdate.indexOf('pulls.merge')
+
+    expect(nextReturn).toBeGreaterThanOrEqual(0)
+    expect(nextReturn, 'must return before any merge call').toBeLessThan(nextMerge)
+  })
+})
