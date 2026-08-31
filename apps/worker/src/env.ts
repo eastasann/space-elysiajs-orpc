@@ -1,11 +1,11 @@
 import { integerFromEnv } from '@newsdeck/config'
+import { databaseEnvSchema } from '@newsdeck/db'
 import { workerQueueEnvSchema } from '@newsdeck/jobs'
 import { z } from 'zod'
 
 /**
- * The worker deliberately does NOT require `DATABASE_URL`: it performs no
- * persistence yet. News ingestion adds it together with the code that uses it,
- * so configuration never claims a dependency the process does not have.
+ * `sources.fetch` is the first handler that persists anything, so this is the
+ * first version of the worker that requires `DATABASE_URL`.
  */
 export const workerEnvSchema = z
   .object({
@@ -16,5 +16,6 @@ export const workerEnvSchema = z
     INSTANCE_ID: z.string().min(1).optional(),
   })
   .extend(workerQueueEnvSchema.shape)
+  .extend(databaseEnvSchema.shape)
 
 export type WorkerEnv = z.infer<typeof workerEnvSchema>

@@ -4,9 +4,10 @@ import { boolean, index, pgTable, text, timestamp, uniqueIndex, uuid } from 'dri
 /**
  * A feed the collector reads from.
  *
- * Only the identity of a feed lives here. Fetch bookkeeping (`last_fetched_at`,
- * `etag`, `last_error`) belongs with the job that writes it, not with the
- * table that names the feed.
+ * Fetch bookkeeping (`etag`, `last_modified`, `last_fetched_at`, `last_error`)
+ * lives here rather than in its own table: it is one row per source, written
+ * by the `sources.fetch` job, and read back by the same job to make the next
+ * request conditional.
  */
 export const sources = pgTable(
   'sources',
@@ -16,6 +17,14 @@ export const sources = pgTable(
     feedUrl: text('feed_url').notNull(),
     siteUrl: text('site_url'),
     isActive: boolean('is_active').notNull().default(true),
+    /** Stored verbatim from the `ETag` response header and echoed on the next fetch. */
+    etag: text('etag'),
+    /** Stored verbatim from the `Last-Modified` response header and echoed on the next fetch. */
+    lastModified: text('last_modified'),
+    /** When the collector last attempted this feed, success or failure. */
+    lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+    /** Message from the most recent failed attempt; cleared on the next success. */
+    lastError: text('last_error'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

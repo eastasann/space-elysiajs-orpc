@@ -7,6 +7,7 @@
  */
 import { hostname } from 'node:os'
 import { parseEnv } from '@newsdeck/config'
+import { createDatabase } from '@newsdeck/db'
 import {
   createRedisConnection,
   createSystemQueue,
@@ -19,7 +20,9 @@ import { createLogger } from '@newsdeck/logger'
 import { workerEnvSchema } from './env.ts'
 import { createHeartbeatHandler } from './handlers/heartbeat.ts'
 import { createHandlerRegistry } from './handlers/registry.ts'
+import { createSourcesFetchHandler } from './handlers/sources-fetch.ts'
 import { startHealthServer } from './health.ts'
+import { createSourcesRepository } from './modules/sources/repository.ts'
 import { createProcessor } from './processor.ts'
 
 const startedAt = Date.now()
@@ -27,6 +30,11 @@ const env = parseEnv(workerEnvSchema, process.env)
 const instanceId = env.INSTANCE_ID ?? hostname()
 
 const logger = createLogger({ service: 'worker', instanceId, level: env.LOG_LEVEL })
+
+const database = createDatabase({
+  url: env.DATABASE_URL,
+  maxConnections: env.DATABASE_MAX_CONNECTIONS,
+})
 
 // BullMQ needs a dedicated blocking connection for the consumer; sharing one
 // with the producer would stall queue writes behind a blocking read.
@@ -49,7 +57,10 @@ for (const [name, connection] of [
 
 const queue = createSystemQueue(producerRedis)
 
-const registry = createHandlerRegistry([createHeartbeatHandler(producerRedis)])
+const registry = createHandlerRegistry([
+  createHeartbeatHandler(producerRedis),
+  createSourcesFetchHandler({ repository: createSourcesRepository(database) }),
+])
 
 const worker = createSystemWorker({
   connection: consumerRedis,
@@ -99,6 +110,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   health.stop(true)
   consumerRedis.disconnect()
   producerRedis.disconnect()
+  await database.close()
 
   logger.info('shutdown complete')
   process.exit(0)
