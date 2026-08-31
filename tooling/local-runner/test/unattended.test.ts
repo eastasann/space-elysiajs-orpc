@@ -765,6 +765,57 @@ describe('unavailable verification is never a pass', () => {
     }
   })
 
+  test('a present but unusable tool is unavailable, not a failure', async () => {
+    // `docker` on PATH with a stopped daemon. Without the probe this would be
+    // a *failure*, and the issue would spend its whole coding budget on
+    // something no agent can fix.
+    const policy = structuredClone(TEST_POLICY)
+    const step = policy.tiers.medium.steps[0]
+    if (step === undefined) throw new Error('expected a medium-tier step')
+    step.requiresProbe = ['docker', 'info']
+
+    const outcome = await verify({
+      cwd: '/tmp',
+      risk: 'medium',
+      policy,
+      changedFiles: ['src/service.ts'],
+      which: (command) => `/usr/bin/${command}`,
+      runner: async (command, args) =>
+        command === 'docker' && args[0] === 'info'
+          ? {
+              code: 1,
+              stdout: '',
+              stderr: 'Cannot connect to the Docker daemon',
+              timedOut: false,
+              display: '',
+            }
+          : { code: 0, stdout: '', stderr: '', timedOut: false, display: '' },
+    })
+
+    expect(outcome.unavailable).toContain('e2e')
+    expect(outcome.failed).toEqual([])
+    expect(outcome.ok).toBe(false)
+  })
+
+  test('a usable tool runs the step normally', async () => {
+    const policy = structuredClone(TEST_POLICY)
+    const step = policy.tiers.medium.steps[0]
+    if (step === undefined) throw new Error('expected a medium-tier step')
+    step.requiresProbe = ['docker', 'info']
+
+    const outcome = await verify({
+      cwd: '/tmp',
+      risk: 'medium',
+      policy,
+      changedFiles: ['src/service.ts'],
+      which: (command) => `/usr/bin/${command}`,
+      runner: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false, display: '' }),
+    })
+
+    expect(outcome.unavailable).toEqual([])
+    expect(outcome.ok).toBe(true)
+  })
+
   test('the tiered verifier reports a missing tool as unavailable', async () => {
     const outcome = await verify({
       cwd: '/tmp',

@@ -109,6 +109,23 @@ export async function verify(options: VerifyOptions): Promise<VerificationOutcom
       continue
     }
 
+    // Present is not the same as usable. A stopped Docker daemon must report
+    // itself unavailable, not fail — otherwise the issue spends its entire
+    // coding budget on something no agent can fix.
+    if (step.requiresProbe !== undefined) {
+      const [command, ...args] = step.requiresProbe
+      const probe = await exec(command as string, args, { cwd: options.cwd, timeoutMs: 60_000 })
+      if (probe.code !== 0) {
+        record(
+          step.name,
+          'unavailable',
+          0,
+          `\`${step.requiresProbe.join(' ')}\` failed, so this step could not run: ${redact(probe.stderr.trim() || probe.stdout.trim()).slice(-500)}`,
+        )
+        continue
+      }
+    }
+
     const startedAt = Date.now()
     const result = await exec(step.command, step.args, {
       cwd: options.cwd,

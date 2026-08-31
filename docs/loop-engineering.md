@@ -75,6 +75,18 @@ changes on the strength of a check that never happened. No amount of agent
 effort installs Docker, so the issue is marked `agent:blocked` and the loop moves
 to independent work.
 
+A step declares `requires` (a binary that must be on `PATH`) and optionally
+`requiresProbe` (a command that must succeed). The second matters more than it
+looks: `docker` present with a stopped daemon is the ordinary state of a laptop
+that rebooted, and without the probe the step would *fail* rather than report
+itself unavailable — spending the issue's entire coding budget on something no
+agent can fix.
+
+The Docker smoke step runs `docker compose up -d --build --wait`, not plain
+`up -d`. Without `--wait` the command returns as soon as containers *start*, so
+a stack that crashes on boot would still exit 0 — a smoke test that passes when
+the thing is broken is worse than none.
+
 ### High-risk dual review
 
 ```mermaid

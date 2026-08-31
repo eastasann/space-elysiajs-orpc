@@ -169,7 +169,8 @@
             "packages/api-client/**"
           ],
           "requires": "docker",
-          "timeoutMinutes": 30
+          "timeoutMinutes": 30,
+          "requiresProbe": ["docker", "info"]
         }
       ]
     },
@@ -180,10 +181,11 @@
         {
           "name": "docker-smoke",
           "command": "bun",
-          "args": ["run", "docker:up"],
+          "args": ["run", "docker:smoke"],
           "whenChanged": ["infra/**", "docker-compose*.yml", "apps/**", "packages/db/**"],
           "requires": "docker",
-          "timeoutMinutes": 30
+          "timeoutMinutes": 30,
+          "requiresProbe": ["docker", "info"]
         },
         {
           "name": "load-balancing",
@@ -191,7 +193,8 @@
           "args": ["run", "verify:lb"],
           "whenChanged": ["infra/**", "docker-compose*.yml", "apps/api/**"],
           "requires": "docker",
-          "timeoutMinutes": 10
+          "timeoutMinutes": 10,
+          "requiresProbe": ["docker", "info"]
         },
         {
           "name": "migration",
@@ -199,7 +202,8 @@
           "args": ["run", "db:migrate"],
           "whenChanged": ["packages/db/**"],
           "requires": "docker",
-          "timeoutMinutes": 15
+          "timeoutMinutes": 15,
+          "requiresProbe": ["docker", "info"]
         },
         {
           "name": "loop-self-test",

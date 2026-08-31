@@ -24,6 +24,7 @@
     "db:generate": "bun run --filter '@newsdeck/db' generate",
     "db:migrate": "bun run --filter '@newsdeck/db' migrate",
     "docker:up": "docker compose up -d --build",
+    "docker:smoke": "docker compose up -d --build --wait --wait-timeout 300",
     "docker:down": "docker compose down",
     "docker:reset": "docker compose down --volumes --remove-orphans",
     "docker:logs": "docker compose logs -f",

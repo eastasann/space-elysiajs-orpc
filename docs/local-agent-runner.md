@@ -165,9 +165,14 @@ summoned. All three merge automatically.
 | `high` | Docker smoke · load balancing · migration · loop self-test | **2** |
 
 Steps carrying `whenChanged` run only when the diff touches something they
-guard. A step that *cannot* run — no Docker — is `unavailable`, which blocks the
-issue. "Could not check" and "checked, fine" are different answers and only one
-justifies a merge.
+guard. A step that *cannot* run is `unavailable`, which blocks the issue rather
+than failing it: "could not check" and "checked, fine" are different answers and
+only one justifies a merge, but neither is the agent's fault.
+
+Availability is checked twice — `requires` for a binary on `PATH`, and
+`requiresProbe` for a command that must succeed. `docker` installed with a
+stopped daemon is the ordinary state of a laptop that rebooted; without the
+probe that would burn the issue's whole coding budget.
 
 ### Block-and-continue
 

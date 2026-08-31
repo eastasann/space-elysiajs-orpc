@@ -49,7 +49,17 @@ const TierStepSchema = z.object({
   command: z.string().min(1),
   args: z.array(z.string()),
   whenChanged: z.array(z.string().min(1)).optional(),
+  /** A tool that must be on PATH for this step to run. */
   requires: z.string().min(1).optional(),
+  /**
+   * A command that must succeed before this step is considered runnable.
+   *
+   * `requires` proves a binary exists; this proves it works. `docker` on PATH
+   * with a stopped daemon is the common case on a laptop that rebooted, and
+   * without this the step would *fail* rather than report itself unavailable —
+   * burning the issue's whole coding budget on something no agent can fix.
+   */
+  requiresProbe: z.array(z.string().min(1)).min(1).optional(),
   /** Minutes. Docker and E2E steps need far longer than a lint. */
   timeoutMinutes: z.number().int().min(1).max(180).default(20),
 })
