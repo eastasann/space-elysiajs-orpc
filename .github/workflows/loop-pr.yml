@@ -141,6 +141,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Gather evaluation context
+        id: context
         if: steps.resolve.outputs.found == 'true'
         uses: actions/github-script@v7
         env:
@@ -381,7 +382,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           PULL_NUMBER: ${{ steps.resolve.outputs.number }}
-          STICKY_ID: ${{ steps.resolve.outputs.sticky_comment_id }}
+          STICKY_ID: ${{ steps.context.outputs.sticky_comment_id }}
           DECISION: ${{ steps.evaluate.outputs.decision }}
           RISK: ${{ steps.evaluate.outputs.risk }}
           ISSUE: ${{ steps.evaluate.outputs.issue }}

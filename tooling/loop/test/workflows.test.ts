@@ -7,7 +7,15 @@ const WORKFLOW_DIR = new URL('../../../.github/workflows/', import.meta.url).pat
 
 interface Job {
   permissions?: unknown
-  steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown>; name?: string }>
+  steps?: Array<{
+    id?: string
+    uses?: string
+    run?: string
+    with?: Record<string, unknown>
+    env?: Record<string, unknown>
+    if?: string
+    name?: string
+  }>
 }
 interface Workflow {
   on?: unknown
@@ -175,5 +183,53 @@ describe('required checks stay in step with CI', () => {
     for (const name of declared.split(',').map((entry) => entry.trim())) {
       expect(ciJobNames).toContain(name)
     }
+  })
+})
+
+describe('step output references', () => {
+  /**
+   * `steps.<id>.outputs.<name>` against the steps that actually declare an id.
+   *
+   * A reference to a step with no `id` is not an error in Actions — it silently
+   * evaluates to the empty string. That is how the gate came to post a new
+   * status comment on every run instead of updating one: the step that looked
+   * up the existing comment had no `id`, and the step that consumed the result
+   * read it from a different step's outputs. Both halves looked correct in
+   * isolation and the workflow ran green.
+   *
+   * Cheap to check, and the failure mode it catches is invisible in logs.
+   */
+  const REFERENCE = /steps\.([A-Za-z_][\w-]*)\.outputs\.([\w-]+)/g
+
+  it.each(workflows.map((workflow) => [workflow.file, workflow] as const))(
+    '%s references only steps that declare an id',
+    (_file, workflow) => {
+      const declared = new Set<string>()
+      for (const job of Object.values(workflow.doc.jobs ?? {})) {
+        for (const step of job.steps ?? []) {
+          if (step.id !== undefined) declared.add(step.id)
+        }
+      }
+
+      const dangling = [...workflow.text.matchAll(REFERENCE)]
+        .map((match) => match[1] as string)
+        .filter((id) => !declared.has(id))
+
+      expect(
+        [...new Set(dangling)],
+        `${workflow.file} reads outputs from step id(s) that do not exist; a missing id evaluates to an empty string rather than failing`,
+      ).toEqual([])
+    },
+  )
+
+  it('finds the ids it is asserting about, so the test is not vacuous', () => {
+    const gate = workflows.find((workflow) => workflow.file === 'loop-pr.yml')
+    expect(gate).toBeDefined()
+
+    const ids = Object.values(gate?.doc.jobs ?? {}).flatMap((job) =>
+      (job.steps ?? []).map((step) => step.id).filter((id): id is string => id !== undefined),
+    )
+    expect(ids).toContain('resolve')
+    expect(ids).toContain('context')
   })
 })
