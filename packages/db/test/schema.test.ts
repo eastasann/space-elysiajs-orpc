@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test'
 import { getTableConfig } from 'drizzle-orm/pg-core'
-import { userIdentities, users } from '../src/schema/index.ts'
+import {
+  categories,
+  categorySlugSchema,
+  sources,
+  userIdentities,
+  users,
+} from '../src/schema/index.ts'
 
 describe('users table', () => {
   it('generates its own primary key rather than borrowing a provider id', () => {
@@ -50,4 +56,64 @@ describe('user_identities table', () => {
       'provider_user_id',
     )
   })
+})
+
+describe('sources table', () => {
+  it('enforces a unique feed url', () => {
+    const { indexes } = getTableConfig(sources)
+    const feedUrlIndex = indexes.find((index) => index.config.name === 'sources_feed_url_unique')
+
+    expect(feedUrlIndex?.config.unique).toBe(true)
+  })
+
+  it('defaults new sources to active', () => {
+    const { columns } = getTableConfig(sources)
+    const isActive = columns.find((column) => column.name === 'is_active')
+
+    expect(isActive?.hasDefault).toBe(true)
+    expect(isActive?.default).toBe(true)
+  })
+
+  it('indexes active sources for the collector to list', () => {
+    const { indexes } = getTableConfig(sources)
+    const activeIndex = indexes.find((index) => index.config.name === 'sources_active_idx')
+
+    expect(activeIndex?.config.columns.map((column) => 'name' in column && column.name)).toEqual([
+      'is_active',
+    ])
+  })
+})
+
+describe('categories table', () => {
+  it('generates its own primary key', () => {
+    const { columns } = getTableConfig(categories)
+    const id = columns.find((column) => column.name === 'id')
+
+    expect(id?.primary).toBe(true)
+    expect(id?.hasDefault).toBe(true)
+  })
+
+  it('enforces a unique slug', () => {
+    const { indexes } = getTableConfig(categories)
+    const slugIndex = indexes.find((index) => index.config.name === 'categories_slug_unique')
+
+    expect(slugIndex?.config.unique).toBe(true)
+    expect(slugIndex?.config.columns.map((column) => 'name' in column && column.name)).toEqual([
+      'slug',
+    ])
+  })
+})
+
+describe('categorySlugSchema', () => {
+  it('accepts lowercase kebab-case slugs', () => {
+    expect(categorySlugSchema.safeParse('world-news').success).toBe(true)
+    expect(categorySlugSchema.safeParse('sports').success).toBe(true)
+  })
+
+  it.each(['World-News', 'world_news', '-world', 'world-', 'world--news', '', 'wörld'])(
+    'rejects %s as not URL-safe',
+    (candidate) => {
+      expect(categorySlugSchema.safeParse(candidate).success).toBe(false)
+    },
+  )
 })

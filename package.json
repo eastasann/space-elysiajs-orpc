@@ -23,6 +23,7 @@
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "db:generate": "bun run --filter '@newsdeck/db' generate",
     "db:migrate": "bun run --filter '@newsdeck/db' migrate",
+    "db:seed": "bun run --filter '@newsdeck/db' seed",
     "docker:up": "docker compose up -d --build",
     "docker:smoke": "docker compose up -d --build --wait --wait-timeout 300",
     "docker:down": "docker compose down",

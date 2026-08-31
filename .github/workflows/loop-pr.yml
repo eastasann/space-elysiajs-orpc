@@ -16,6 +16,15 @@ name: Loop - pull request gate
 #      command. Untrusted values reach `bun` only through files and through
 #      `actions/github-script` variables, never through `${{ }}` inside `run:`.
 #
+# Exactly one job, `merge`, holds `contents: write` — asking GitHub to finish a
+# pull request needs it. It is safe by construction rather than by convention:
+# it checks nothing out, so it has no working tree and no repository code to
+# run, it has no shell step, and every step is `actions/github-script`. It acts
+# only on a `decision` computed by the `gate` job from trusted state. The job
+# that checks out the repository and runs the review agent stays read-only, and
+# `tooling/loop/test/workflows.test.ts` fails the build if either half of that
+# split is given away.
+#
 # A pull request from a fork is evaluated but never merged automatically; the
 # gate reports `human_approval_required` for it.
 #
@@ -73,12 +82,24 @@ jobs:
   gate:
     name: Loop gate
     runs-on: ubuntu-latest
+    # Consumed by the `merge` job below, which is deliberately a separate job so
+    # that the write permission a merge needs never sits on the job that runs
+    # the review agent and the repository's own code.
+    outputs:
+      decision: ${{ steps.evaluate.outputs.decision }}
+      pull_number: ${{ steps.resolve.outputs.number }}
+      found: ${{ steps.resolve.outputs.found }}
     permissions:
       contents: read # checkout the trusted default branch
-      pull-requests: write # sticky comment, labels, auto-merge
+      pull-requests: write # sticky comment and labels
       issues: write # lifecycle labels on the linked issue
       checks: write # publish loop/risk-gate and loop/review-gate
-      actions: read # read the triggering CI run
+      # `read` for the triggering CI run, `write` because requesting a fix round
+      # dispatches loop-agent-dispatch. With only `read` that step failed with
+      # "Resource not accessible by integration", so a review that requested
+      # changes went nowhere and the pull request simply stopped — #43 is the
+      # worked example. This grants the ability to start a workflow, not to push.
+      actions: write
       id-token: write # the review agent's action mints its App token via OIDC
     steps:
       - name: Resolve the pull request
@@ -466,41 +487,6 @@ jobs:
               }
             }
 
-      - name: Enable auto-merge
-        if: steps.resolve.outputs.found == 'true' && steps.evaluate.outputs.decision == 'auto_merge'
-        uses: actions/github-script@v7
-        env:
-          PULL_NUMBER: ${{ steps.resolve.outputs.number }}
-        with:
-          script: |
-            // GitHub's own auto-merge, not a merge call. It fires only once the
-            // repository's required checks pass, so the ruleset remains the
-            // final authority even if this workflow is wrong.
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: Number(process.env.PULL_NUMBER),
-            })
-
-            try {
-              await github.graphql(
-                `mutation ($id: ID!) {
-                   enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) {
-                     clientMutationId
-                   }
-                 }`,
-                { id: pr.node_id },
-              )
-              core.info('Auto-merge enabled (squash).')
-            } catch (error) {
-              // Most often: auto-merge is disabled for the repository, or the
-              // pull request is already mergeable with no required checks.
-              core.warning(`Could not enable auto-merge: ${error.message}`)
-              core.notice(
-                'Enable "Allow auto-merge" in repository settings and require the loop gate checks in a ruleset.',
-              )
-            }
-
       - name: Request the fix loop
         if: steps.resolve.outputs.found == 'true' && steps.evaluate.outputs.should_dispatch_fix == 'true'
         uses: actions/github-script@v7
@@ -532,3 +518,232 @@ jobs:
         run: |
           echo "The loop is blocked and needs a human. See the job summary." >&2
           exit 1
+
+  # Asking GitHub to finish a pull request is the only thing in this workflow
+  # that needs write access to the repository, so it is the only thing in this
+  # job. Nothing is checked out here: the job has no working tree, runs no
+  # repository code and no agent, and its single step calls two GitHub APIs.
+  # That is what keeps "the loop cannot push a commit" true while still letting
+  # it complete a pull request the gate approved.
+  #
+  # GitHub remains the authority either way. Auto-merge holds the pull request
+  # until the ruleset is satisfied; the direct call is refused by the ruleset if
+  # anything required is not green. This job can finish a merge GitHub would
+  # already permit, and nothing more.
+  merge:
+    name: Merge when the gate approved
+    needs: gate
+    if: needs.gate.outputs.found == 'true' && needs.gate.outputs.decision == 'auto_merge'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # enablePullRequestAutoMerge and the merge API both write
+      pull-requests: write
+      actions: write # tell loop-next-issue the merge happened; see below
+    steps:
+      - name: Ask GitHub to merge
+        uses: actions/github-script@v7
+        env:
+          PULL_NUMBER: ${{ needs.gate.outputs.pull_number }}
+        with:
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const pull_number = Number(process.env.PULL_NUMBER)
+
+            // Both paths that end in a merged pull request funnel through this,
+            // because a merge nothing announces is a merge the loop never
+            // notices. See the block below the merge call for why announcing is
+            // necessary at all.
+            const announce = async () => {
+              // Guarded and retried, because this is the last thing standing
+              // between a merged pull request and a loop that never notices.
+              // By the time it runs the merge has happened, so throwing would
+              // fail the job without undoing anything, and nothing would try
+              // again: no push event fires for a GITHUB_TOKEN merge, and the
+              // gate's resolve step skips a pull request that is no longer
+              // open, so no later run ever revisits it.
+              for (const attempt of [1, 2]) {
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: 'loop-next-issue.yml',
+                    ref: context.payload.repository.default_branch,
+                    inputs: { dispatch_agent: 'true' },
+                  })
+                  core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')
+                  return
+                } catch (error) {
+                  core.warning(`Announcement attempt ${attempt} failed: ${error.message}`)
+                }
+              }
+
+              // Loud rather than fatal. The merge stands; what is lost is the
+              // issue close and the next issue, which a manual run of
+              // loop-next-issue recovers.
+              core.error(
+                `Merged #${pull_number} but could not tell loop-next-issue. ` +
+                  'The shipped issue stays open and no next issue starts until ' +
+                  'loop-next-issue is run.',
+              )
+            }
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number })
+            if (pr.merged) {
+              // Reached when auto-merge completed the merge after an earlier run
+              // enabled it. That merge raised no event either, so this is the
+              // only place it can be announced — and returning here without
+              // announcing is what made the deferred path silently stall.
+              //
+              // Announcing twice is cheap, not free. Closing the issue is
+              // idempotent, but selection is only advisory: the claim happens
+              // later, in the separately dispatched agent run, so two
+              // announcements close together can both select the same next
+              // issue and start two coding agents on it. The cost is a wasted
+              // agent run; the cost of announcing zero times is a merge the
+              // loop never notices. Preferring the first is deliberate.
+              core.info('Already merged; announcing it.')
+              await announce()
+              return
+            }
+
+            // Every merge moves the default branch, so in a loop that merges
+            // repeatedly a pull request opened minutes ago is routinely behind
+            // by the time it is approved, and the ruleset requires it to be
+            // current. Nothing else brings it forward, so an approved change
+            // would sit at `behind` indefinitely: #36 and #40 both did.
+            //
+            // This is the one place the loop writes to a branch, and it can
+            // only write one thing: GitHub merging this pull request's own base
+            // into its head. It cannot introduce content, and the push restarts
+            // CI and this gate, so the updated head is reviewed again before
+            // anything merges. Returning here is what makes that happen.
+            if (pr.mergeable_state === 'behind') {
+              // Guarded like every other write here. `updateBranch` returns 422
+              // when the head moved between the snapshot above and this call, or
+              // when GitHub's mergeable-state computation was stale. Throwing
+              // would fail the job and leave the pull request exactly where it
+              // was — the stall this block exists to clear, with a red run as
+              // the only sign of it.
+              try {
+                await github.rest.pulls.updateBranch({ owner, repo, pull_number })
+                core.info('Branch was behind the base; updated it. CI and the gate will run again.')
+              } catch (error) {
+                core.warning(`Could not update the branch: ${error.message}`)
+                core.notice('Leaving it for the next event rather than failing the run.')
+              }
+              return
+            }
+
+            // Merging directly is tried first, and the ordering is the point.
+            //
+            // Auto-merge defers the merge to GitHub, and a deferred merge is one
+            // this job cannot announce: Actions raises no events for anything
+            // GITHUB_TOKEN does, including a merge GitHub completes for an
+            // auto-merge this job enabled. So the loop would go quiet exactly as
+            // it did after #40. Merging here instead keeps the merge and its
+            // announcement in the same run, where the announcement can be
+            // conditional on the merge having actually happened.
+            //
+            // This gate runs after CI and publishes its own two checks moments
+            // earlier, so by now the pull request is normally mergeable and this
+            // is the path that runs. The ruleset still decides: it refuses
+            // anything not fully green, and a refusal is reported, never forced.
+            let merged = false
+            try {
+              await github.rest.pulls.merge({ owner, repo, pull_number, merge_method: 'squash' })
+              core.info('Merged (squash).')
+              merged = true
+            } catch (error) {
+              core.info(`Could not merge yet: ${error.message}`)
+            }
+
+            if (!merged) {
+              // The merge may have failed because it had already happened.
+              // GitHub's own auto-merge reacts to the same check-completion
+              // event and completes far faster than a fresh Actions run can
+              // queue, check out and start, so whenever an earlier run enabled
+              // auto-merge, this run can lose that race and see `already
+              // merged` here. Treating that as "still pending" would enable
+              // auto-merge as a no-op and return without announcing — the #40
+              // stall again, on the one path the fallback exists to serve.
+              const { data: now } = await github.rest.pulls.get({ owner, repo, pull_number })
+              if (now.merged) {
+                core.info('GitHub merged it while this run was working; announcing it.')
+                await announce()
+                return
+              }
+
+              // Genuinely still pending. Hand it to GitHub, which holds the
+              // pull request until the ruleset is satisfied — then wait for it,
+              // rather than assuming something will come back for it.
+              //
+              // An earlier comment here claimed a real check completing would
+              // fire CI and this gate again. A reviewer showed that is not so:
+              // `decideMerge` only returns `auto_merge` once every tracked
+              // check is already green, so nothing this loop tracks is pending
+              // by the time this runs. What is left is a stale
+              // `mergeable_state` or a required check the loop does not track,
+              // and neither guarantees another event — GitHub completes the
+              // merge server-side, raising none, and there is no scheduled
+              // sweep. Waiting here is what keeps that merge announceable.
+              //
+              // The merge that follows is not announced by this run, and cannot
+              // be. It does not strand the pull request: whatever is still
+              // pending is a real check, and a real check completing fires CI
+              // and this gate again, so a later run reaches the merged early
+              // return above or merges and announces it then.
+              try {
+                await github.graphql(
+                  `mutation ($id: ID!) {
+                     enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) {
+                       clientMutationId
+                     }
+                   }`,
+                  { id: pr.node_id },
+                )
+                core.info('Auto-merge enabled (squash); waiting for GitHub to take it.')
+              } catch (error) {
+                core.warning(`GitHub declined both the merge and auto-merge: ${error.message}`)
+                core.notice('The ruleset governs this merge; nothing was forced.')
+                return
+              }
+
+              // Bounded: a minute is long enough for a stale mergeable_state to
+              // settle and short enough not to hold a runner open. If it lands,
+              // this run announces it; if not, the log says plainly that the
+              // announcement is owed, so a silent stall reads as one.
+              for (let waited = 0; waited < 60_000; waited += 10_000) {
+                await new Promise((resolve) => setTimeout(resolve, 10_000))
+                const { data: after } = await github.rest.pulls.get({ owner, repo, pull_number })
+                if (after.merged) {
+                  core.info('Auto-merge completed it; announcing.')
+                  await announce()
+                  return
+                }
+              }
+
+              core.warning(
+                `Auto-merge is enabled on #${pull_number} but it has not merged yet. ` +
+                  'Whenever it does, no event follows, so loop-next-issue must be ' +
+                  'run to close the issue and start the next one.',
+              )
+              return
+            }
+
+            // Reached only when this run merged the pull request itself, which
+            // is why the merge is done above rather than deferred.
+            //
+            // The merge is invisible to Actions: GitHub raises no workflow
+            // events for anything GITHUB_TOKEN does. So `loop-next-issue` never
+            // sees the push, the finished issue is never closed, and no next
+            // issue is selected — the loop merges once and goes quiet.
+            //
+            // #40 is the worked example. It merged at 08:51:20 and no
+            // `loop-next-issue` run exists for that commit, while #41 — merged
+            // by auto-merge a person had enabled — did raise one.
+            //
+            // Saying so explicitly is the fix. `workflow_dispatch` is exempt
+            // from the no-events rule, which is why the loop's own agent
+            // dispatch has always worked from this same token.
+            await announce()
