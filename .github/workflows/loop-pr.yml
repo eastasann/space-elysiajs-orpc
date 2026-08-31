@@ -555,14 +555,37 @@ jobs:
             // notices. See the block below the merge call for why announcing is
             // necessary at all.
             const announce = async () => {
-              await github.rest.actions.createWorkflowDispatch({
-                owner,
-                repo,
-                workflow_id: 'loop-next-issue.yml',
-                ref: context.payload.repository.default_branch,
-                inputs: { dispatch_agent: 'true' },
-              })
-              core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')
+              // Guarded and retried, because this is the last thing standing
+              // between a merged pull request and a loop that never notices.
+              // By the time it runs the merge has happened, so throwing would
+              // fail the job without undoing anything, and nothing would try
+              // again: no push event fires for a GITHUB_TOKEN merge, and the
+              // gate's resolve step skips a pull request that is no longer
+              // open, so no later run ever revisits it.
+              for (const attempt of [1, 2]) {
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: 'loop-next-issue.yml',
+                    ref: context.payload.repository.default_branch,
+                    inputs: { dispatch_agent: 'true' },
+                  })
+                  core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')
+                  return
+                } catch (error) {
+                  core.warning(`Announcement attempt ${attempt} failed: ${error.message}`)
+                }
+              }
+
+              // Loud rather than fatal. The merge stands; what is lost is the
+              // issue close and the next issue, which a manual run of
+              // loop-next-issue recovers.
+              core.error(
+                `Merged #${pull_number} but could not tell loop-next-issue. ` +
+                  'The shipped issue stays open and no next issue starts until ' +
+                  'loop-next-issue is run.',
+              )
             }
 
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number })

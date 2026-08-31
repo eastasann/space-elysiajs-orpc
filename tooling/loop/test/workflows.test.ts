@@ -624,15 +624,24 @@ describe('the loop keeps going after it merges something', () => {
   it('guards every write against a refusal', () => {
     // Each write is followed by a catch before the next one begins, so a
     // refusal degrades to a warning instead of failing the job.
-    for (const call of ['updateBranch', 'pulls.merge', 'enablePullRequestAutoMerge']) {
+    // `createWorkflowDispatch` was missing from this list, and a reviewer
+    // caught it: it is the last write before the loop moves on, and it runs
+    // after the merge, so throwing there fails the job without undoing
+    // anything and nothing retries — the same stall, one call downstream.
+    for (const call of [
+      'updateBranch',
+      'pulls.merge',
+      'enablePullRequestAutoMerge',
+      'createWorkflowDispatch',
+    ]) {
       const at = script.indexOf(call)
       expect(at, `${call} is present`).toBeGreaterThanOrEqual(0)
       expect(script.slice(at), `${call} is followed by a catch`).toContain('} catch')
     }
 
-    // Three writes, three guards.
+    // Four writes, four guards.
     const catches = script.match(/\}\s*catch/g) ?? []
-    expect(catches.length).toBeGreaterThanOrEqual(3)
+    expect(catches.length).toBeGreaterThanOrEqual(4)
   })
 })
 
