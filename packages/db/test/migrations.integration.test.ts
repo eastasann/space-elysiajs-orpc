@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { eq, sql } from 'drizzle-orm'
 import type { DatabaseHandle } from '../src/index.ts'
 import { createDatabase, probeDatabase, runMigrations } from '../src/index.ts'
-import { sources, userIdentities, users } from '../src/schema/index.ts'
+import { categories, sources, userIdentities, users } from '../src/schema/index.ts'
+import { seedCategories } from '../src/seed-categories.ts'
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL
 
@@ -31,6 +32,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     await runMigrations(handle)
     await handle.db.execute(sql`truncate table ${users} restart identity cascade`)
     await handle.db.execute(sql`truncate table ${sources} restart identity cascade`)
+    await handle.db.execute(sql`truncate table ${categories} restart identity cascade`)
   })
 
   afterAll(async () => {
@@ -47,6 +49,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     expect(names).toContain('users')
     expect(names).toContain('user_identities')
     expect(names).toContain('sources')
+    expect(names).toContain('categories')
   })
 
   it('is idempotent when applied twice', async () => {
@@ -162,6 +165,38 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     expect(caught).toBeDefined()
     expect(cause?.code).toBe('23505')
     expect(cause?.constraint_name).toBe('sources_feed_url_unique')
+  })
+
+  it('rejects a second category with the same slug', async () => {
+    await handle.db.insert(categories).values({ slug: 'world', name: 'World', displayOrder: 0 })
+
+    let caught: unknown
+    try {
+      await handle.db
+        .insert(categories)
+        .values({ slug: 'world', name: 'Also World', displayOrder: 1 })
+    } catch (error) {
+      caught = error
+    }
+
+    const cause = (caught as { cause?: { constraint_name?: string; code?: string } } | undefined)
+      ?.cause
+
+    expect(caught).toBeDefined()
+    expect(cause?.code).toBe('23505')
+    expect(cause?.constraint_name).toBe('categories_slug_unique')
+  })
+
+  it('seeds categories idempotently', async () => {
+    const first = await seedCategories(handle.db)
+    const rowsAfterFirst = await handle.db.select().from(categories)
+
+    const second = await seedCategories(handle.db)
+    const rowsAfterSecond = await handle.db.select().from(categories)
+
+    expect(first).toBe(second)
+    expect(rowsAfterSecond).toHaveLength(rowsAfterFirst.length)
+    expect(new Set(rowsAfterSecond.map((row) => row.slug)).size).toBe(rowsAfterSecond.length)
   })
 })
 

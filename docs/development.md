@@ -134,6 +134,21 @@ runs from several replicas are safe.
 
 `bun run db:migrate` on the host reads `DATABASE_URL` from your environment.
 
+### Seeding reference data
+
+Some tables hold curated, operator-managed rows rather than user data — the
+`categories` table is the first. Unlike a migration, this data changes on its
+own schedule, so it is not baked into a migration file. Edit
+`packages/db/src/seed-data.ts` and run:
+
+```bash
+bun run db:seed
+```
+
+against `DATABASE_URL`. The seed upserts on each row's natural key (e.g.
+`categories.slug`), so running it any number of times converges on the same
+rows instead of duplicating them.
+
 ---
 
 ## Testing
