@@ -393,3 +393,55 @@ describe('the issue lifecycle survives a missing runner', () => {
     expect(script).toContain('removeLabel')
   })
 })
+
+describe('the agent action can actually authenticate', () => {
+  const CLAUDE_ACTION = 'anthropics/claude-code-action'
+
+  // The action exchanges an OIDC token for a Claude GitHub App token. Without
+  // `id-token: write` it fails before the agent starts — "Unable to get
+  // ACTIONS_ID_TOKEN_REQUEST_URL" — and in loop-pr.yml the review steps carry
+  // `continue-on-error`, so the failure shows up only as a blocked review with
+  // no stated cause.
+  const jobsRunningTheAgent = workflows.flatMap(({ file, doc }) =>
+    Object.entries(doc.jobs ?? {})
+      .filter(([, job]) => (job.steps ?? []).some((s) => s.uses?.startsWith(CLAUDE_ACTION)))
+      .map(([name, job]) => ({ file, name, job })),
+  )
+
+  it('finds the jobs that run the agent', () => {
+    expect(jobsRunningTheAgent.length).toBeGreaterThan(0)
+  })
+
+  it('grants id-token: write wherever the action runs', () => {
+    for (const { file, name, job } of jobsRunningTheAgent) {
+      const permissions = job.permissions as Record<string, string> | undefined
+      expect(permissions?.['id-token'], `${file}: job ${name}`).toBe('write')
+    }
+  })
+})
+
+describe('cleanup steps run when the thing they clean up after fails', () => {
+  // A condition with no status function is implicitly ANDed with `success()`,
+  // so a step that reacts to another step's failure is skipped by the very
+  // failure it exists for. This is invisible in review and only shows up as
+  // state left behind on a bad run.
+  const STATUS_FUNCTION = /\b(?:always|failure|cancelled)\s*\(\s*\)/
+
+  const reactsToFailure = loopWorkflows.flatMap(({ file, doc }) =>
+    Object.entries(doc.jobs ?? {}).flatMap(([job, spec]) =>
+      (spec.steps ?? [])
+        .filter((step) => /steps\.[\w-]+\.outputs\.\w+\s*!=\s*'success'/.test(step.if ?? ''))
+        .map((step) => ({ file, job, step })),
+    ),
+  )
+
+  it('finds at least one such step', () => {
+    expect(reactsToFailure.length).toBeGreaterThan(0)
+  })
+
+  it('gates them on a status function', () => {
+    for (const { file, job, step } of reactsToFailure) {
+      expect(STATUS_FUNCTION.test(step.if ?? ''), `${file}: ${job} / ${step.name}`).toBe(true)
+    }
+  })
+})

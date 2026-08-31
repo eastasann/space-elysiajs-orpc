@@ -53,6 +53,12 @@ jobs:
       contents: read
       issues: write # lifecycle labels and the status comment
       pull-requests: write
+      # The action exchanges an OIDC token for a Claude GitHub App token, and
+      # that App identity is the point: GitHub raises no workflow events for a
+      # GITHUB_TOKEN push, so an agent pushing with one would open pull requests
+      # that nothing ever runs on. Without this the exchange fails before the
+      # agent starts, with `ACTIONS_ID_TOKEN_REQUEST_URL` missing.
+      id-token: write
 
     steps:
       - name: Validate the inputs
@@ -238,7 +244,12 @@ jobs:
             || format('/loop-implement {0} {1}', github.repository, inputs.issue) }}
 
       - name: Report that the coding agent failed
-        if: env.CODING_AGENT_AVAILABLE == 'true' && steps.coding_agent.outputs.conclusion != 'success'
+        # `always()` is load-bearing. Without a status function Actions implies
+        # `success()`, which skips this step whenever a previous one failed —
+        # precisely when the agent died rather than finished badly, and
+        # precisely when the claim most needs clearing. Issue #4 was left
+        # `agent:in-progress` with no pull request that way.
+        if: always() && env.CODING_AGENT_AVAILABLE == 'true' && steps.coding_agent.outputs.conclusion != 'success'
         uses: actions/github-script@v7
         env:
           ISSUE: ${{ inputs.issue }}
