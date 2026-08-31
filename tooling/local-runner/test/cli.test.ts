@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { parseArgs } from '../bin/loop.ts'
-import { loadConfig } from '../src/config.ts'
+import { applyFlags, parseArgs } from '../bin/loop.ts'
+import { issueBudget, loadConfig } from '../src/config.ts'
 import { currentBranch, ensureWorktree, isClean, removeWorktree } from '../src/git.ts'
 import { createSandbox } from './support.ts'
 
@@ -41,14 +41,40 @@ describe('command line', () => {
 describe('configuration defaults', () => {
   test('are conservative when the environment says nothing', () => {
     const config = loadConfig({})
-    expect(config.LOOP_MAX_ISSUES).toBe(1)
-    expect(config.LOCAL_AGENT_MAX_FIX_ROUNDS).toBe(3)
+
+    expect(config.LOOP_UNATTENDED).toBe(false)
+    expect(issueBudget(config)).toBe(1)
+    expect(config.LOOP_CODING_FIX_ROUNDS).toBe(3)
+    expect(config.LOOP_CI_FIX_ROUNDS).toBe(3)
   })
 
-  test('unlimited execution has to be asked for explicitly', () => {
-    expect(loadConfig({ LOOP_MAX_ISSUES: '0' }).LOOP_MAX_ISSUES).toBe(0)
+  test('unattended mode lifts the per-run ceiling and nothing else', () => {
+    const unattended = loadConfig({ LOOP_UNATTENDED: 'true' })
+
+    expect(issueBudget(unattended)).toBe(0)
+    // Per-issue limits are untouched: unattended is not unbounded.
+    expect(unattended.LOOP_CODING_FIX_ROUNDS).toBe(3)
+    expect(unattended.LOOP_MAX_MODEL_INVOCATIONS_PER_HOUR).toBeGreaterThan(0)
+    expect(unattended.LOOP_MAX_ISSUES_PER_DAY).toBeGreaterThan(0)
+  })
+
+  test('an explicit ceiling still wins in unattended mode', () => {
+    expect(issueBudget(loadConfig({ LOOP_UNATTENDED: 'true', LOOP_MAX_ISSUES: '2' }))).toBe(2)
+  })
+
+  test('rejects limits outside their range', () => {
     expect(() => loadConfig({ LOOP_MAX_ISSUES: '-1' })).toThrow()
-    expect(() => loadConfig({ LOCAL_AGENT_MAX_FIX_ROUNDS: '99' })).toThrow()
+    expect(() => loadConfig({ LOOP_CODING_FIX_ROUNDS: '99' })).toThrow()
+    expect(() => loadConfig({ LOOP_POLL_INTERVAL_SECONDS: '1' })).toThrow()
+  })
+
+  test('--unattended and --max-issues override the environment', () => {
+    const args = parseArgs(['watch', '--unattended', '--max-issues', '2'])
+    if ('help' in args || 'error' in args) throw new Error('expected parsed args')
+
+    const config = applyFlags(loadConfig({}), args)
+    expect(config.LOOP_UNATTENDED).toBe(true)
+    expect(issueBudget(config)).toBe(2)
   })
 })
 

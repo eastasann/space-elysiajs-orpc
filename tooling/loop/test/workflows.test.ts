@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 
@@ -7,7 +7,15 @@ const WORKFLOW_DIR = new URL('../../../.github/workflows/', import.meta.url).pat
 
 interface Job {
   permissions?: unknown
-  steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown>; name?: string }>
+  steps?: Array<{
+    id?: string
+    uses?: string
+    run?: string
+    with?: Record<string, unknown>
+    env?: Record<string, unknown>
+    if?: string
+    name?: string
+  }>
 }
 interface Workflow {
   on?: unknown
@@ -174,6 +182,168 @@ describe('required checks stay in step with CI', () => {
 
     for (const name of declared.split(',').map((entry) => entry.trim())) {
       expect(ciJobNames).toContain(name)
+    }
+  })
+})
+
+describe('step output references', () => {
+  /**
+   * `steps.<id>.outputs.<name>` against the steps that actually declare an id.
+   *
+   * A reference to a step with no `id` is not an error in Actions — it silently
+   * evaluates to the empty string. That is how the gate came to post a new
+   * status comment on every run instead of updating one: the step that looked
+   * up the existing comment had no `id`, and the step that consumed the result
+   * read it from a different step's outputs. Both halves looked correct in
+   * isolation and the workflow ran green.
+   *
+   * Cheap to check, and the failure mode it catches is invisible in logs.
+   */
+  const REFERENCE = /steps\.([A-Za-z_][\w-]*)\.outputs\.([\w-]+)/g
+
+  it.each(workflows.map((workflow) => [workflow.file, workflow] as const))(
+    '%s references only steps that declare an id',
+    (_file, workflow) => {
+      const declared = new Set<string>()
+      for (const job of Object.values(workflow.doc.jobs ?? {})) {
+        for (const step of job.steps ?? []) {
+          if (step.id !== undefined) declared.add(step.id)
+        }
+      }
+
+      const dangling = [...workflow.text.matchAll(REFERENCE)]
+        .map((match) => match[1] as string)
+        .filter((id) => !declared.has(id))
+
+      expect(
+        [...new Set(dangling)],
+        `${workflow.file} reads outputs from step id(s) that do not exist; a missing id evaluates to an empty string rather than failing`,
+      ).toEqual([])
+    },
+  )
+
+  it('finds the ids it is asserting about, so the test is not vacuous', () => {
+    const gate = workflows.find((workflow) => workflow.file === 'loop-pr.yml')
+    expect(gate).toBeDefined()
+
+    const ids = Object.values(gate?.doc.jobs ?? {}).flatMap((job) =>
+      (job.steps ?? []).map((step) => step.id).filter((id): id is string => id !== undefined),
+    )
+    expect(ids).toContain('resolve')
+    expect(ids).toContain('context')
+  })
+})
+
+describe('the cloud agent integration', () => {
+  /**
+   * The loop's agents run as Claude Code cloud executions in GitHub Actions,
+   * authenticated with a Claude subscription token. These assertions pin the
+   * three things that are easy to get wrong and silent when wrong: the wrong
+   * credential (which bills an API key), an input the action does not have
+   * (which is ignored rather than rejected), and a bot allowlist wide enough
+   * for any installed App to drive the agent.
+   */
+  const agentSteps = workflows.flatMap((workflow) =>
+    Object.values(workflow.doc.jobs ?? {}).flatMap((job) =>
+      (job.steps ?? [])
+        .filter((step) => step.uses?.startsWith('anthropics/claude-code-action') === true)
+        .map((step) => ({ file: workflow.file, step })),
+    ),
+  )
+
+  it('invokes the action somewhere', () => {
+    expect(agentSteps.length).toBeGreaterThan(0)
+  })
+
+  it('authenticates with a subscription token, never an API key', () => {
+    for (const { file, step } of agentSteps) {
+      const inputs = step.with ?? {}
+      expect(inputs.claude_code_oauth_token, `${file}: ${step.name}`).toBeDefined()
+      expect(inputs.anthropic_api_key, `${file}: ${step.name}`).toBeUndefined()
+    }
+  })
+
+  it('passes only inputs the action actually defines', () => {
+    // `prompt_file` and `output_file` do not exist. An unknown input is not an
+    // error in Actions — it is dropped — so a workflow using one looks correct
+    // and silently does nothing with it.
+    const known = new Set([
+      'anthropic_api_key',
+      'claude_code_oauth_token',
+      'prompt',
+      'claude_args',
+      'settings',
+      'track_progress',
+      'base_branch',
+      'branch_prefix',
+      'use_sticky_comment',
+      'github_token',
+      'additional_permissions',
+      'allowed_bots',
+      'allowed_non_write_users',
+      'trigger_phrase',
+      'label_trigger',
+      'assignee_trigger',
+      'plugin_marketplaces',
+      'plugins',
+      'use_bedrock',
+      'use_vertex',
+      'use_commit_signing',
+    ])
+
+    for (const { file, step } of agentSteps) {
+      const unknown = Object.keys(step.with ?? {}).filter((input) => !known.has(input))
+      expect(unknown, `${file}: ${step.name} passes an input the action does not define`).toEqual(
+        [],
+      )
+    }
+  })
+
+  it('names the bots it allows rather than allowing all of them', () => {
+    for (const { file, step } of agentSteps) {
+      const allowed = String(step.with?.allowed_bots ?? '')
+      expect(allowed, `${file}: ${step.name} must set allowed_bots`).not.toBe('')
+      // `*` would let any installed GitHub App trigger the agent with a prompt
+      // it controls. The action's own documentation warns about it.
+      expect(allowed, `${file}: ${step.name} must not allow every bot`).not.toContain('*')
+    }
+  })
+
+  it('drives the agents through skills committed to the repository', () => {
+    const root = new URL('../../../', import.meta.url).pathname
+
+    for (const skill of ['loop-review', 'loop-implement', 'loop-fix']) {
+      expect(existsSync(join(root, '.claude', 'skills', skill, 'SKILL.md')), skill).toBe(true)
+    }
+
+    // Every prompt invokes a skill, so the instructions are reviewable code
+    // rather than a string buried in YAML.
+    for (const { file, step } of agentSteps) {
+      const prompt = String(step.with?.prompt ?? '')
+      expect(
+        prompt.trim().startsWith('/') || prompt.includes('/loop-'),
+        `${file}: ${step.name}`,
+      ).toBe(true)
+    }
+  })
+
+  it('lets a failed review withhold the merge rather than fail the job', () => {
+    // A reviewer that crashes must produce no verdict file, so the aggregate
+    // sees fewer reviews than the tier requires and blocks. Failing the job
+    // instead would lose the distinction between "reviewed and objected" and
+    // "never ran".
+    const gate = workflows.find((workflow) => workflow.file === 'loop-pr.yml')
+    const reviewers = Object.values(gate?.doc.jobs ?? {}).flatMap((job) =>
+      (job.steps ?? []).filter(
+        (step) =>
+          step.uses?.startsWith('anthropics/claude-code-action') === true &&
+          String(step.id ?? '').includes('review'),
+      ),
+    )
+
+    expect(reviewers.length).toBeGreaterThanOrEqual(2)
+    for (const step of reviewers) {
+      expect((step as { 'continue-on-error'?: boolean })['continue-on-error']).toBe(true)
     }
   })
 })

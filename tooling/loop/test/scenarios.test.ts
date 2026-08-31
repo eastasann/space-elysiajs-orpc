@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { selectNextIssue } from '../src/eligibility.ts'
 import { type CheckState, decideMerge, type GateInput } from '../src/merge-gate.ts'
+import { reviewersForRisk } from '../src/policy.ts'
 import type { Finding, ReviewResult } from '../src/review.ts'
 import { classifyRisk } from '../src/risk.ts'
 import { approvingReview, diffOf, realPolicy } from './support/fixtures.ts'
@@ -14,9 +15,13 @@ function allPassing(): CheckState[] {
 }
 
 function gate(overrides: Partial<GateInput> = {}) {
+  const risk = overrides.risk ?? 'low'
   const input: GateInput = {
-    risk: 'low',
-    review: approvingReview(),
+    risk,
+    // One review by default; the high-risk tier asks for two, and every test
+    // that exercises it says so explicitly.
+    reviews: [approvingReview()],
+    requiredReviewers: reviewersForRisk(policy, risk),
     checks: allPassing(),
     requiredChecks: REQUIRED_CHECKS,
     reviewAttempts: 0,
@@ -28,6 +33,11 @@ function gate(overrides: Partial<GateInput> = {}) {
     ...overrides,
   }
   return decideMerge(input)
+}
+
+/** The two independent approvals the high-risk tier requires. */
+function dualApproval(): ReviewResult[] {
+  return [approvingReview(), approvingReview()]
 }
 
 /**
@@ -73,7 +83,7 @@ describe('Scenario B: low risk, review requests changes', () => {
       },
     ],
   }
-  const outcome = gate({ risk: 'low', review })
+  const outcome = gate({ risk: 'low', reviews: [review] })
 
   it('does not merge', () => {
     expect(outcome.decision).toBe('changes_requested')
@@ -99,38 +109,67 @@ describe('Scenario B: low risk, review requests changes', () => {
       category: 'security',
     }
 
-    const withSecret = gate({ review: approvingReview({ findings: [secret] }) })
+    const withSecret = gate({ reviews: [approvingReview({ findings: [secret] })] })
     expect(withSecret.decision).toBe('changes_requested')
     expect(withSecret.reviewGate).toBe('failure')
   })
 })
 
 describe('Scenario C: high risk with everything else passing', () => {
-  const outcome = gate({ risk: 'high' })
-
-  it('does not merge automatically', () => {
-    expect(outcome.decision).toBe('human_approval_required')
-    expect(outcome.decision).not.toBe('auto_merge')
+  // The philosophy change. Risk decides how much verification is demanded, not
+  // whether a person is summoned. Two independent reviews and the high tier's
+  // verification are the price; a human's attention is not.
+  const outcome = gate({
+    risk: 'high',
+    reviews: dualApproval(),
+    tierVerification: { ok: true, unavailable: [], failed: [] },
   })
 
-  it('fails the risk gate, which is a required check', () => {
-    expect(outcome.riskGate).toBe('failure')
+  it('merges automatically once the high tier is satisfied', () => {
+    expect(outcome.decision).toBe('auto_merge')
   })
 
-  it('still passes the review gate, so the reason is unambiguous', () => {
+  it('passes both loop gates', () => {
+    expect(outcome.riskGate).toBe('success')
     expect(outcome.reviewGate).toBe('success')
-    expect(outcome.reasons.join(' ')).toContain('no human approval')
   })
 
-  it('does not silently downgrade to a fix loop', () => {
-    expect(outcome.shouldDispatchFix).toBe(false)
+  it('needed no human approval to get there', () => {
+    expect(outcome.decision).not.toBe('human_approval_required')
+    expect(outcome.reasons.join(' ')).not.toContain('human')
   })
 
-  it('becomes mergeable once a human approves', () => {
-    const approved = gate({ risk: 'high', humanApprovals: 1 })
+  it('refuses when only one of the two required reviews arrived', () => {
+    // One approval out of two required is a missing opinion, not a favourable
+    // one. This is the whole reason dual review is worth anything.
+    const short = gate({ risk: 'high', reviews: [approvingReview()] })
 
-    expect(approved.decision).toBe('auto_merge')
-    expect(approved.riskGate).toBe('success')
+    expect(short.decision).toBe('blocked')
+    expect(short.reviewGate).toBe('failure')
+    expect(short.reasons.join(' ')).toContain('1 of 2')
+  })
+
+  it('refuses when the high tier could not run its verification', () => {
+    const unavailable = gate({
+      risk: 'high',
+      reviews: dualApproval(),
+      tierVerification: { ok: false, unavailable: ['docker-smoke'], failed: [] },
+    })
+
+    expect(unavailable.decision).toBe('blocked')
+    expect(unavailable.riskGate).toBe('failure')
+    expect(unavailable.reasons.join(' ')).toContain('not a passing one')
+  })
+
+  it('asks for a fix when the high tier ran and failed', () => {
+    const failed = gate({
+      risk: 'high',
+      reviews: dualApproval(),
+      tierVerification: { ok: false, unavailable: [], failed: ['e2e'] },
+    })
+
+    expect(failed.decision).toBe('changes_requested')
+    expect(failed.shouldDispatchFix).toBe(true)
   })
 })
 
@@ -177,7 +216,7 @@ describe('Scenario E: retry limit exceeded', () => {
     summary: 'Still not right.',
     findings: [],
   }
-  const outcome = gate({ review, reviewAttempts: policy.retry.maxReviewAttempts })
+  const outcome = gate({ reviews: [review], reviewAttempts: policy.retry.maxReviewAttempts })
 
   it('stops the automation', () => {
     expect(outcome.decision).toBe('blocked')
@@ -192,7 +231,10 @@ describe('Scenario E: retry limit exceeded', () => {
   })
 
   it('keeps retrying while attempts remain', () => {
-    const remaining = gate({ review, reviewAttempts: policy.retry.maxReviewAttempts - 1 })
+    const remaining = gate({
+      reviews: [review],
+      reviewAttempts: policy.retry.maxReviewAttempts - 1,
+    })
 
     expect(remaining.decision).toBe('changes_requested')
     expect(remaining.shouldDispatchFix).toBe(true)
@@ -268,11 +310,39 @@ describe('Other refusals to merge', () => {
 
   it('blocks when the review agent is unavailable or unusable', () => {
     const blocked = gate({
-      review: { status: 'blocked', findings: [], summary: 'Review agent is not configured.' },
+      reviews: [{ status: 'blocked', findings: [], summary: 'Review agent is not configured.' }],
     })
 
     expect(blocked.decision).toBe('blocked')
     expect(blocked.reviewGate).toBe('failure')
+  })
+
+  it('holds for a person when one applies the hold label', () => {
+    const held = gate({ humanHold: true })
+
+    expect(held.decision).toBe('human_approval_required')
+    expect(held.reasons.join(' ')).toContain('needs:human')
+  })
+
+  it('holds for a person when the change weakens the loop’s own protections', () => {
+    const weakening = gate({
+      risk: 'high',
+      reviews: dualApproval(),
+      weakenedProtections: [
+        {
+          severity: 'critical',
+          file: '.github/loop-policy.json',
+          line: null,
+          description: 'Required check `Tests` was removed from the policy.',
+          suggested_action: 'Restore it.',
+          source: 'control-plane',
+          category: 'policy',
+        },
+      ],
+    })
+
+    expect(weakening.decision).toBe('human_approval_required')
+    expect(weakening.riskGate).toBe('failure')
   })
 
   it('cannot be talked into merging by an approving review alone', () => {
@@ -290,7 +360,7 @@ describe('Other refusals to merge', () => {
 })
 
 describe('Risk classification feeding the gate', () => {
-  it('sends a workflow change to the human gate end to end', () => {
+  it('sends a workflow change to the strongest tier, and still merges it', () => {
     const risk = classifyRisk({
       diff: diffOf([{ path: '.github/workflows/loop-pr.yml', added: ['  x: 1'] }]),
       labels: ['risk:low'],
@@ -298,7 +368,15 @@ describe('Risk classification feeding the gate', () => {
     })
 
     expect(risk.risk).toBe('high')
-    expect(gate({ risk: risk.risk }).decision).toBe('human_approval_required')
+    expect(risk.controlPlane?.affected).toBe(true)
+
+    // High, dual-reviewed, fully verified — and merged, with no human involved.
+    const outcome = gate({
+      risk: risk.risk,
+      reviews: dualApproval(),
+      tierVerification: { ok: true, unavailable: [], failed: [] },
+    })
+    expect(outcome.decision).toBe('auto_merge')
   })
 
   it('lets an ordinary feature change merge end to end', () => {

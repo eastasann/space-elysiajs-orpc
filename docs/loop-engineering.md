@@ -8,6 +8,7 @@ describes the same lifecycle when a person drives it. The rules in
 [`AGENTS.md`](../AGENTS.md) apply unchanged; this document adds what happens
 around them.
 
+- [Fully unattended mode](#fully-unattended-mode)
 - [Two planes](#two-planes)
 - [Lifecycle](#lifecycle)
 - [Labels](#labels)
@@ -24,6 +25,277 @@ around them.
 - [Connecting a coding agent](#connecting-a-coding-agent)
 - [The local execution plane](#the-local-execution-plane)
 - [What is not automated](#what-is-not-automated)
+
+---
+
+## Fully unattended mode
+
+Normal development on this repository is autonomous. A person defines the
+backlog; the loop implements it, verifies it, reviews it, merges it, and moves
+to the next issue. Human intervention is exceptional rather than part of the
+happy path.
+
+```bash
+bun run loop:watch --unattended
+```
+
+### The governing idea
+
+Risk decides **how much verification a change must pass**, not **whether a
+person must approve it**.
+
+The old model sent every `risk:high` change to a human. That did not make those
+changes safer — it made them slower, and it meant an issue whose acceptance
+criteria said "document this in `AGENTS.md`" stalled on a documentation edit.
+Risk now buys verification depth, and all three tiers merge on their own.
+
+| | Verification | Independent reviews | Merges automatically |
+| --- | --- | --- | --- |
+| `risk:low` | format · lint · typecheck · test · build | 1 | yes |
+| `risk:medium` | + dependency audit · end-to-end | 1 | yes |
+| `risk:high` | + Docker smoke · load balancing · migration · loop self-test | **2** | yes |
+
+Tiers are cumulative and defined as data in
+[`.github/loop-policy.json`](../.github/loop-policy.json). A step carrying
+`whenChanged` runs only when the diff touches something it could break, so a
+README fix does not start Docker.
+
+### A step that cannot run is not a step that passed
+
+Each verification step ends in one of four states, and the fourth is the one
+that matters:
+
+- **passed** / **failed** — it ran and gave an answer.
+- **not-applicable** — the diff touches nothing it guards.
+- **unavailable** — it could not run at all, because a tool it needs is missing.
+
+`unavailable` blocks the issue. An unattended loop that counted "Docker isn't
+installed" as "the Docker smoke test succeeded" would merge infrastructure
+changes on the strength of a check that never happened. No amount of agent
+effort installs Docker, so the issue is marked `agent:blocked` and the loop moves
+to independent work.
+
+A step declares `requires` (a binary that must be on `PATH`) and optionally
+`requiresProbe` (a command that must succeed). The second matters more than it
+looks: `docker` present with a stopped daemon is the ordinary state of a laptop
+that rebooted, and without the probe the step would *fail* rather than report
+itself unavailable — spending the issue's entire coding budget on something no
+agent can fix.
+
+The Docker smoke step runs `docker compose up -d --build --wait`, not plain
+`up -d`. Without `--wait` the command returns as soon as containers *start*, so
+a stack that crashes on boot would still exit 0 — a smoke test that passes when
+the thing is broken is worse than none.
+
+### High-risk dual review
+
+```mermaid
+flowchart LR
+    coder["Coding agent<br/>(fresh session)"] --> pr["Pull request"]
+    pr --> a["Reviewer A<br/>(fresh session)"]
+    pr --> b["Reviewer B<br/>(fresh session)"]
+    a --> agg["Aggregator"]
+    b --> agg
+    agg -->|both approve, no blocking findings| merge["GitHub auto-merge"]
+    agg -->|either requests changes| fix["Fix round"]
+    agg -->|either blocked, or one missing| blocked["agent:blocked"]
+    fix --> coder
+```
+
+Two Claude Code invocations with no shared session and no sight of the coder's
+reasoning. [`aggregateReviews`](../tooling/loop/src/aggregate.ts) resolves them
+strictly:
+
+- fewer usable reviews than the tier requires → **blocked**;
+- any reviewer `blocked` → **blocked**;
+- any reviewer `request_changes`, or any finding at or above the blocking
+  severity from either → **request_changes**;
+- otherwise → **approve**.
+
+A reviewer that could not be run has expressed no opinion, and no opinion is
+never read as no objection. That single rule is what makes the second reviewer
+worth its cost.
+
+### Protecting the control plane
+
+An autonomous system that can rewrite its own merge policy has no merge policy.
+[`control-plane.ts`](../tooling/loop/src/control-plane.ts) enforces three
+things:
+
+1. **Reaching the control plane is always high risk.** Workflows, the policy
+   file, `tooling/loop`, and the agent prompts. A one-line edit to the merge
+   gate is not a small change.
+2. **Risk is monotonic.** A change is classified under the base branch's policy
+   *and* under whatever policy it proposes, and the stricter answer wins.
+   "Change the policy so this counts as low risk" buys nothing.
+3. **Weakening is detected, and needs a person.** Dropping a required check,
+   losing a reviewer, deleting a tier step, raising the blocking severity,
+   removing a risk rule, or introducing `pull_request_target` produces a
+   `critical` finding and the one remaining `human_approval_required`.
+
+`AGENTS.md` is deliberately **not** a high-risk path. Its diff is matched
+against `controlPlane.policySignals`, so correcting a stale command is
+documentation (`medium`) and changing what agents may merge is policy (`high`,
+control plane). The two no longer share a classification.
+
+### Test integrity
+
+For a loop that merges on green, nothing distinguishes "fixed the bug" from
+"stopped looking for it" — so
+[`check:test-integrity`](../tooling/loop/src/checks/test-integrity.ts) looks.
+Deleted test files, added skips, `.only`, assertions that cannot fail,
+file-wide `@ts-nocheck` and lint suppressions all raise blocking findings.
+Removing a test can be right; it belongs in the issue, and saying so there is
+cheap.
+
+### Block-and-continue
+
+A single failed issue is not a global stop.
+
+```
+#10 fails its budget  →  agent:blocked, comment, loop moves on
+#11 depends on #10    →  temporarily ineligible (label untouched)
+#12 independent       →  claimed and worked
+```
+
+`#11` keeps `agent:ready`. It is *ineligible*, not blocked, and becomes
+available again on its own the moment `#10` closes — GitHub remains the source
+of truth and nothing has to remember.
+
+### Retry limits
+
+| Category | Default | Exhausting it |
+| --- | --- | --- |
+| Coding rounds per issue | 3 | issue blocked, loop continues |
+| Review rounds per issue | 3 | issue blocked, loop continues |
+| CI rounds per issue | 3 | issue blocked, loop continues |
+| Reviewer retries | 2 | that review counts as absent → blocked |
+| Conflict resolution | 2 | issue blocked, loop continues |
+
+A resumed run starts at `fixRounds + 1`, so restarting the runner cannot hand
+the agent a fresh budget.
+
+### Operational budgets
+
+Unattended is not unlimited. Retry limits bound one issue; these bound the loop.
+
+| Variable | Default |
+| --- | --- |
+| `LOOP_MAX_MODEL_INVOCATIONS_PER_HOUR` | 60 |
+| `LOOP_MAX_ISSUES_PER_DAY` | 20 |
+| `LOOP_MAX_RUNTIME_HOURS` | 12 |
+| `LOOP_MAX_CONSECUTIVE_FAILURES` | 8 |
+
+Counting is by event, not by token or dollar. Claude Code reports a cost per
+invocation, but building a spend limit on a number whose contract is not
+guaranteed would fail in the direction of not stopping.
+
+### Recovery
+
+Transient GitHub and Claude failures are waited out with exponential backoff
+(30s, doubling, capped at 15 minutes), and a run of consecutive failures ends
+the session rather than spinning. A failing test is never treated as transient —
+it is the answer.
+
+Authentication loss stops new claims, preserves state, and retries slowly.
+Nothing is lost, because the state that matters lives on GitHub.
+
+### Global stop conditions
+
+The session ends only when:
+
+1. no eligible independent issue remains;
+2. every remaining issue depends on blocked work;
+3. GitHub stays unreachable past the retry policy;
+4. Claude stays unavailable past the retry policy;
+5. an operational budget is spent;
+6. the per-run issue ceiling is reached;
+7. someone stops the process.
+
+A single failed issue is not one of them. Neither is a `risk:high` issue, nor a
+pull request awaiting review — the system performs that review itself.
+
+### Where the agents run
+
+Both agents are **Claude Code cloud executions in GitHub Actions**, through
+[`anthropics/claude-code-action@v1`](https://github.com/anthropics/claude-code-action),
+authenticated with `claude_code_oauth_token`. The action's documentation is
+explicit: *"If you authenticate with an OAuth token, runs use your Claude
+subscription instead of API billing."*
+
+So:
+
+- **No Anthropic API key.** One repository secret, `CLAUDE_CODE_OAUTH_TOKEN`,
+  from `claude setup-token`.
+- **No local machine and no local clone.** Nothing has to be awake.
+- **No persistent process.** Each event starts a fresh execution.
+
+The instructions are skills committed under `.claude/skills/`, so a prompt that
+decides what an autonomous agent does is reviewed like any other code:
+
+| Skill | Invoked as | Does |
+| --- | --- | --- |
+| `loop-implement` | `/loop-implement owner/repo N` | implements one issue, opens the pull request |
+| `loop-fix` | `/loop-fix owner/repo N` | addresses review findings or failing CI on an open pull request |
+| `loop-review` | `/loop-review owner/repo N path` | reviews a pull request, writes a JSON verdict to `path` |
+
+`loop-review` writes its verdict to a file rather than a comment, and the gate
+validates it against `ReviewResultSchema` before reading a field. A missing or
+malformed file is `blocked`, never an approval — which is why the review steps
+carry `continue-on-error: true`. A reviewer that crashes must *produce no
+verdict*, so the aggregate sees fewer reviews than the tier requires and
+withholds the merge. Failing the job instead would lose the distinction between
+"reviewed and objected" and "never ran".
+
+High risk runs the action **twice**, as two separate steps. Two steps are two
+Claude Code sessions with no shared context — a reviewer continuing the first
+one's conversation would be confirming its own conclusions rather than checking
+them.
+
+### What starts each execution
+
+Every step of the loop is a GitHub event, and Actions can trigger the agent on
+any of them:
+
+| Moment | Event | Starts |
+| --- | --- | --- |
+| An issue is ready | `push` to `main` after a merge → `loop-next-issue.yml` | coding agent |
+| A pull request opens | `workflow_run` on CI → `loop-pr.yml` | review agent |
+| CI finishes | `workflow_run` | review agent, then the gate |
+| Review requests changes | the gate dispatches `loop-agent-dispatch.yml` | fix round |
+| A pull request merges | `push` to `main` | next issue |
+
+Two things make that chain actually close:
+
+- The action authenticates as the **Claude GitHub App**, not with
+  `GITHUB_TOKEN`. GitHub raises no workflow events for `GITHUB_TOKEN` pushes, so
+  an agent that used it would open pull requests nothing ever ran on.
+- `allowed_bots` names `claude[bot]` and `github-actions[bot]`. The action
+  rejects every bot actor by default, which would otherwise stop the second link
+  in the chain. It is a named list rather than `*` because `*` lets any
+  installed App drive the agent with a prompt it controls.
+
+### Commands
+
+```bash
+bun run loop:status                     # mode, phase, backlog, blockers
+bun run loop:once --dry-run             # the plan; changes nothing
+bun run loop:watch --unattended --dry-run
+bun run loop:once                       # one issue, then stop
+bun run loop:watch --unattended         # until there is nothing left
+bun run loop:watch --unattended --max-issues 2   # controlled validation
+```
+
+Ctrl-C stops after the current step, releases the lock, and prints the run
+summary. `bun run loop:status` after a restart explains where everything stands;
+`bun run loop:once` resumes rather than duplicating.
+
+### What humans still control
+
+Product direction, backlog priorities, `agent:ready`, credentials, external
+production access, and the `needs:human` label — which takes any pull request
+out of the loop's hands. Plus the two cases the loop refuses to decide: a fork,
+and a change that weakens the loop's own protections.
 
 ---
 
@@ -556,24 +828,16 @@ reference, its inputs, and that it opens a pull request before enabling it.
 
 The same applies to `LOOP_REVIEW_PROVIDER` in `loop-pr.yml`.
 
-### Or run the agent locally instead
+### Running the agents locally instead
 
-`loop-agent-dispatch.yml` is not the only way to connect an agent, and it is not
-the one this repository actually uses. The supported path is the **local
-runner**: Claude Code on a developer's own machine, authenticated with their own
-subscription, producing ordinary pull requests that this control plane then
-gates.
+The [local runner](./local-agent-runner.md) is the alternative, not the default.
+It does the same work from a developer's own machine with `loop:watch
+--unattended`, and it exists for two cases: working offline, and debugging a
+loop cycle with a live console. It needs a clone and a machine that stays awake,
+which the cloud path does not.
 
-```bash
-bun run loop:status
-bun run loop:once --dry-run
-bun run loop:once
-```
-
-Nothing about the control plane changes. The runner arrives at exactly the point
-`loop-agent-dispatch.yml` would have — a pull request with `Closes #N` on an
-`agent/issue-*` branch — and everything after that is identical. See
-[local-agent-runner.md](./local-agent-runner.md).
+Both produce the same thing — an `agent/issue-*` branch and a pull request — and
+the control plane cannot tell them apart.
 
 ---
 
@@ -604,17 +868,15 @@ a human.
 
 Stated plainly, so nothing here reads as a claim it is not:
 
-- **Agent invocation from GitHub Actions.** No hosted runner is connected;
-  `loop-agent-dispatch.yml` is a boundary, not a provider. The
-  [local runner](./local-agent-runner.md) is the connected path, and it runs on
-  a developer's machine, not in Actions.
-- **Review agent in the workflow.** `loop-pr.yml` still has no model connected,
-  so the gate's review is the deterministic checks alone and reports `blocked`
-  for the agent portion. The local runner does run a real review agent, but
-  that review is advisory and does not satisfy the workflow's gate.
-- **An end-to-end run.** The local runner has never taken a real issue through
-  to a merged pull request in this repository. Its components are tested against
-  fakes and real git; the whole path has not been exercised.
+- **A first cloud run.** The wiring is complete and asserted by tests, but no
+  issue has yet gone through the cloud path end to end in this repository. Until
+  `CLAUDE_CODE_OAUTH_TOKEN` is set, every pull request reports `blocked` for the
+  review portion, which is the intended fail-closed default rather than a fault.
+- **Repository settings.** Rulesets, required checks and auto-merge are applied
+  by a person; `loop-bootstrap.yml` prints exactly what to set.
+- **Merge-conflict detection on the base branch.** GitHub raises no webhook when
+  the base branch advances and creates a conflict, so nothing reacts to it until
+  the next event on the pull request.
 - **Repository settings.** Rulesets, required checks and auto-merge must be
   applied by a human. They are printed by `loop-bootstrap.yml`.
 - **Live workflow execution.** The decision logic is covered by 206 tests. The

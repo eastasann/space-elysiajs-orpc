@@ -30,8 +30,12 @@ export const runRecordSchema = z.object({
   startedAt: z.string(),
   updatedAt: z.string(),
   status: z.enum(['in-progress', 'awaiting-review', 'blocked', 'done']),
-  /** Fix rounds spent locally. Bounds LOCAL_AGENT_MAX_FIX_ROUNDS. */
+  /** Coding rounds spent locally. Bounds LOOP_CODING_FIX_ROUNDS. */
   fixRounds: z.number().int().min(0).max(100).default(0),
+  /** Rounds spent responding to failing CI. Bounds LOOP_CI_FIX_ROUNDS. */
+  ciRounds: z.number().int().min(0).max(100).default(0),
+  /** Attempts at resolving a merge conflict. Bounds LOOP_CONFLICT_ROUNDS. */
+  conflictRounds: z.number().int().min(0).max(100).default(0),
   pullRequest: z.number().int().positive().nullable().default(null),
   /** Risk this machine computed. Advisory: the workflow recomputes it. */
   risk: z.enum(['low', 'medium', 'high']).nullable().default(null),

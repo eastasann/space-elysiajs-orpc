@@ -1,16 +1,17 @@
 name: Loop - coding agent dispatch
 
-# The boundary between this repository's orchestration and whatever runs the
-# coding agent.
+# Runs the coding agent for one issue, in the cloud.
 #
-# This repository implements everything up to the invocation: selecting an
-# issue, claiming it, building the task, and reporting the outcome. It does not
-# ship an agent runner. Unless a provider is configured this workflow reports
-# that the runner is missing and fails loudly, which is the honest signal — a
-# loop that quietly does nothing looks identical to one that is working.
+# The agent is the Claude Code GitHub Action authenticated with a Claude
+# subscription token, so no Anthropic API key is involved and no machine of the
+# developer's has to be awake. Its instructions are a skill committed at
+# `.claude/skills/loop-implement/`, reviewed like any other code.
 #
-# To connect a runner, set the repository variable LOOP_AGENT_PROVIDER and the
-# matching secret. See docs/loop-engineering.md#connecting-a-coding-agent.
+# With no CLAUDE_CODE_OAUTH_TOKEN secret the workflow says so and fails loudly,
+# which is the honest signal — a loop that quietly does nothing looks identical
+# to one that is working.
+#
+# See docs/loop-engineering.md#fully-unattended-mode.
 
 on:
   workflow_dispatch:
@@ -41,6 +42,8 @@ concurrency:
 
 env:
   BUN_VERSION: '1.3.11'
+  CODING_AGENT_AVAILABLE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+  LOOP_ALLOWED_BOTS: ${{ vars.LOOP_ALLOWED_BOTS || 'claude[bot],github-actions[bot]' }}
 
 jobs:
   dispatch:
@@ -153,7 +156,7 @@ jobs:
             core.setOutput('title', after.title)
 
       - name: Report that no agent runner is configured
-        if: vars.LOOP_AGENT_PROVIDER == ''
+        if: env.CODING_AGENT_AVAILABLE != 'true'
         uses: actions/github-script@v7
         env:
           MODE: ${{ inputs.mode }}
@@ -166,16 +169,17 @@ jobs:
             const lines = [
               '### Coding agent not dispatched',
               '',
-              'The loop reached the point of invoking the coding agent, but no runner',
-              'is configured for this repository.',
+              'The loop reached the point of invoking the coding agent, but this',
+              'repository has no `CLAUDE_CODE_OAUTH_TOKEN` secret.',
               '',
               `- Mode: \`${process.env.MODE}\``,
               `- Target: ${target ? `#${target}` : '(none)'}`,
               `- Review attempt: ${process.env.ATTEMPT || 'n/a'}`,
               '',
-              '**To connect one**, set the repository variable `LOOP_AGENT_PROVIDER`',
-              'and its matching secret, then re-run this workflow. See',
-              '`docs/loop-engineering.md#connecting-a-coding-agent`.',
+              '**To connect one**, run `claude setup-token` and add the result as the',
+              'repository secret `CLAUDE_CODE_OAUTH_TOKEN`. That token authenticates',
+              'with a Claude subscription, so no Anthropic API key is needed. See',
+              '`docs/loop-engineering.md#fully-unattended-mode`.',
               '',
               'Until then, implement the issue by hand. Everything else in the loop —',
               'risk classification, review, gates, merge policy, next-issue selection —',
@@ -205,19 +209,57 @@ jobs:
             // explicit stop condition, and a stop condition must be visible.
             core.setFailed('No coding agent runner is configured; the loop stops here.')
 
-      # --- Provider integration --------------------------------------------
-      # Runs only when LOOP_AGENT_PROVIDER selects it.
-      #
-      # NOT VERIFIED IN THIS REPOSITORY: no Anthropic credential and no Claude
-      # GitHub App installation were available when this workflow was written.
-      # Confirm the action reference, its inputs, and that it opens a pull
-      # request before enabling this in a repository you care about.
+      # --- The coding agent -------------------------------------------------
+      # A Claude Code cloud execution, authenticated with the subscription token.
+      # The action pushes and opens the pull request as the Claude GitHub App
+      # rather than with GITHUB_TOKEN, which is what lets CI and the gate fire on
+      # its commits — GitHub does not raise workflow events for GITHUB_TOKEN
+      # pushes, and a pull request nothing runs on would stall the loop silently.
       - name: Run the coding agent
-        if: vars.LOOP_AGENT_PROVIDER == 'claude-code-action'
+        id: coding_agent
+        if: env.CODING_AGENT_AVAILABLE == 'true'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            Work the task described by ${{ inputs.mode == 'fix' && format('pull request #{0}', inputs.pull_request) || format('issue #{0}', inputs.issue) }}.
-            Follow AGENTS.md exactly, including the verification and self-review steps.
-            Open a pull request that references the issue with "Closes #N".
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # This workflow is dispatched by the loop itself, so the triggering
+          # actor is a bot. The action allows none by default.
+          allowed_bots: ${{ env.LOOP_ALLOWED_BOTS }}
+          branch_prefix: agent/
+          prompt: >-
+            ${{ inputs.mode == 'fix'
+            && format('/loop-fix {0} {1}', github.repository, inputs.pull_request)
+            || format('/loop-implement {0} {1}', github.repository, inputs.issue) }}
+
+      - name: Report that the coding agent failed
+        if: env.CODING_AGENT_AVAILABLE == 'true' && steps.coding_agent.outputs.conclusion != 'success'
+        uses: actions/github-script@v7
+        env:
+          ISSUE: ${{ inputs.issue }}
+        with:
+          script: |
+            // A failed coding pass blocks this issue and nothing else. The loop
+            // moves to independent work; leaving the issue as `agent:in-progress`
+            // would strand it as neither available nor being worked on.
+            const issue_number = Number(process.env.ISSUE)
+            if (!Number.isInteger(issue_number)) return
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: [
+                '### Coding agent did not finish',
+                '',
+                'The run ended without success. The issue is marked `agent:blocked`',
+                'so the loop moves on to independent work; nothing else waits on it.',
+                '',
+                `[Run log](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,
+              ].join('\n'),
+            })
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: ['agent:blocked'],
+            })
+            await github.rest.issues
+              .removeLabel({ owner, repo, issue_number, name: 'agent:in-progress' })
+              .catch(() => {})

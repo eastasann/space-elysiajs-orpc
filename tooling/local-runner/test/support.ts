@@ -1,11 +1,17 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type LoopPolicy, parsePolicy } from '@newsdeck/loop'
+import { type LoopPolicy, parsePolicy, type RiskLevel } from '@newsdeck/loop'
 import type { CodingAgent, CodingTask, ReviewAgent, ReviewTask } from '../src/agent.ts'
 import type { RunnerConfig } from '../src/config.ts'
 import { run } from '../src/exec.ts'
-import type { CreatePullRequestInput, GhClient, GhIssue, GhPullRequest } from '../src/github.ts'
+import type {
+  CreatePullRequestInput,
+  GhIssue,
+  GhPullRequest,
+  GitHubAdapter,
+  Mergeability,
+} from '../src/github.ts'
 import { nullLog } from '../src/logs.ts'
 import type { RunnerDeps } from '../src/orchestrator.ts'
 import type { VerificationOutcome } from '../src/verify.ts'
@@ -20,7 +26,14 @@ import type { VerificationOutcome } from '../src/verify.ts'
  */
 
 export const TEST_POLICY: LoopPolicy = parsePolicy({
-  retry: { maxReviewAttempts: 3 },
+  retry: {
+    maxReviewAttempts: 3,
+    codingFixRounds: 3,
+    reviewFixRounds: 3,
+    ciFixRounds: 3,
+    reviewerRetryRounds: 2,
+    conflictRounds: 2,
+  },
   risk: {
     default: 'low',
     paths: [
@@ -34,17 +47,68 @@ export const TEST_POLICY: LoopPolicy = parsePolicy({
       publicContractGlobs: ['packages/contracts/**'],
     },
   },
+  tiers: {
+    low: {
+      reviewers: 1,
+      steps: [{ name: 'test', command: 'bun', args: ['run', 'test'], timeoutMinutes: 5 }],
+    },
+    medium: {
+      inherits: 'low',
+      reviewers: 1,
+      steps: [
+        {
+          name: 'e2e',
+          command: 'bun',
+          args: ['run', 'test:e2e'],
+          whenChanged: ['src/**'],
+          requires: 'docker',
+          timeoutMinutes: 5,
+        },
+      ],
+    },
+    high: {
+      inherits: 'medium',
+      reviewers: 2,
+      steps: [
+        {
+          name: 'loop-self-test',
+          command: 'bun',
+          args: ['run', 'test'],
+          whenChanged: ['.github/**', 'tooling/loop/**'],
+          timeoutMinutes: 5,
+        },
+      ],
+    },
+  },
+  controlPlane: {
+    patterns: ['.github/workflows/**', 'tooling/loop/**'],
+    alwaysPolicy: ['.github/loop-policy.json'],
+    policySignals: ['auto[- ]?merge', 'required check', 'must never'],
+  },
   review: { blockingSeverity: 'high' },
+  requiredChecks: ['Tests'],
 })
 
 export const TEST_CONFIG: RunnerConfig = {
+  LOOP_UNATTENDED: false,
   LOOP_MAX_ISSUES: 1,
-  LOCAL_AGENT_MAX_FIX_ROUNDS: 3,
+  LOOP_CODING_FIX_ROUNDS: 3,
+  LOOP_REVIEW_FIX_ROUNDS: 3,
+  LOOP_CI_FIX_ROUNDS: 3,
+  LOOP_REVIEWER_RETRY_ROUNDS: 2,
+  LOOP_CONFLICT_ROUNDS: 2,
   LOOP_WORKTREE_ROOT: '../.loop-worktrees',
   LOOP_POLL_INTERVAL_SECONDS: 60,
   LOOP_CI_TIMEOUT_MINUTES: 30,
   LOOP_AGENT_TIMEOUT_MINUTES: 45,
   LOOP_AGENT_MODEL: '',
+  LOOP_REVIEWER_B_MODEL: '',
+  LOOP_MAX_MODEL_INVOCATIONS_PER_HOUR: 60,
+  LOOP_MAX_ISSUES_PER_DAY: 20,
+  LOOP_MAX_RUNTIME_HOURS: 12,
+  LOOP_MAX_CONSECUTIVE_FAILURES: 8,
+  LOOP_BACKOFF_BASE_SECONDS: 30,
+  LOOP_BACKOFF_MAX_SECONDS: 900,
 }
 
 export interface Sandbox {
@@ -86,12 +150,19 @@ async function must(promise: Promise<{ code: number; stderr: string }>): Promise
 export interface FakeGhOptions {
   issues?: GhIssue[]
   pullRequests?: Record<number, GhPullRequest>
+  /** Merge state per pull request. Defaults to `clean`. */
+  mergeability?: Record<number, Mergeability>
+  /** Throw on the named operation, to exercise recovery paths. */
+  failOn?: { operation: string; message: string }
 }
 
-export interface FakeGh extends GhClient {
+export interface FakeGh extends GitHubAdapter {
   readonly calls: string[]
   readonly comments: Array<{ issue: number; body: string }>
   readonly created: CreatePullRequestInput[]
+  /** Pull requests the runner asked GitHub to auto-merge. */
+  readonly autoMerged: number[]
+  readonly updatedBranches: number[]
   labelsOf(issue: number): string[]
 }
 
@@ -101,7 +172,14 @@ export function fakeGh(options: FakeGhOptions = {}): FakeGh {
   const calls: string[] = []
   const comments: Array<{ issue: number; body: string }> = []
   const created: CreatePullRequestInput[] = []
+  const autoMerged: number[] = []
+  const updatedBranches: number[] = []
+  const mergeStates = options.mergeability ?? {}
   let nextNumber = 100
+
+  const guard = (operation: string) => {
+    if (options.failOn?.operation === operation) throw new Error(options.failOn.message)
+  }
 
   const find = (number: number): GhIssue => {
     const issue = issues.find((candidate) => candidate.number === number)
@@ -113,10 +191,13 @@ export function fakeGh(options: FakeGhOptions = {}): FakeGh {
     calls,
     comments,
     created,
+    autoMerged,
+    updatedBranches,
     labelsOf: (issue) => find(issue).labels.map((label) => label.name),
 
     async issues(labels) {
       calls.push(`issues(${labels.join(',')})`)
+      guard('issues')
       return issues.filter(
         (issue) =>
           issue.state === 'open' &&
@@ -189,6 +270,28 @@ export function fakeGh(options: FakeGhOptions = {}): FakeGh {
       calls.push(`pullRequestDiff(${number})`)
       return ''
     },
+
+    async enableAutoMerge(number) {
+      calls.push(`enableAutoMerge(${number})`)
+      guard('enableAutoMerge')
+      autoMerged.push(number)
+    },
+
+    async updateBranch(number) {
+      calls.push(`updateBranch(${number})`)
+      guard('updateBranch')
+      updatedBranches.push(number)
+      mergeStates[number] = 'clean'
+    },
+
+    async rerunFailedChecks(number) {
+      calls.push(`rerunFailedChecks(${number})`)
+    },
+
+    async mergeability(number) {
+      calls.push(`mergeability(${number})`)
+      return mergeStates[number] ?? 'clean'
+    },
   }
 }
 
@@ -245,27 +348,57 @@ export function approvingReview(): Awaited<ReturnType<ReviewAgent['review']>> {
   }
 }
 
-export function passingVerification(): VerificationOutcome {
+export function passingVerification(risk: RiskLevel = 'low'): VerificationOutcome {
   return {
     ok: true,
-    steps: [{ name: 'test', ok: true, durationMs: 1, output: '' }],
+    risk,
+    steps: [{ name: 'test', outcome: 'passed', ok: true, durationMs: 1, output: '' }],
     firstFailure: null,
+    unavailable: [],
+    failed: [],
   }
 }
 
-export function failingVerification(): VerificationOutcome {
-  const step = { name: 'test', ok: false, durationMs: 1, output: '1 test failed' }
-  return { ok: false, steps: [step], firstFailure: step }
+export function failingVerification(risk: RiskLevel = 'low'): VerificationOutcome {
+  const step = {
+    name: 'test',
+    outcome: 'failed' as const,
+    ok: false,
+    durationMs: 1,
+    output: '1 test failed',
+  }
+  return { ok: false, risk, steps: [step], firstFailure: step, unavailable: [], failed: ['test'] }
+}
+
+/** A tier step that could not run. Never a pass. */
+export function unavailableVerification(
+  name = 'docker-smoke',
+  risk: RiskLevel = 'high',
+): VerificationOutcome {
+  return {
+    ok: false,
+    risk,
+    steps: [
+      { name, outcome: 'unavailable', ok: true, durationMs: 0, output: '`docker` is not on PATH.' },
+    ],
+    firstFailure: null,
+    unavailable: [name],
+    failed: [],
+  }
 }
 
 export interface DepsOverrides extends Partial<RunnerDeps> {
   repository: string
-  gh: GhClient
+  gh: GitHubAdapter
   coding: CodingAgent
-  review: ReviewAgent
+  /** Convenience: one reviewer used for every pass the tier requires. */
+  review?: ReviewAgent
 }
 
 export function testDeps(overrides: DepsOverrides): RunnerDeps {
+  const { review, ...rest } = overrides
+  const reviewers = overrides.reviewers ?? (review === undefined ? [] : [review, review])
+
   return {
     config: TEST_CONFIG,
     policy: TEST_POLICY,
@@ -275,6 +408,11 @@ export function testDeps(overrides: DepsOverrides): RunnerDeps {
     log: () => {},
     createLog: async () => nullLog(),
     verifier: async () => passingVerification(),
-    ...overrides,
+    // The suite never installs dependencies into its temporary repositories.
+    installer: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false, display: '' }),
+    // Waiting is instantaneous, so a watch-mode test finishes in milliseconds.
+    sleep: async () => {},
+    ...rest,
+    reviewers,
   }
 }

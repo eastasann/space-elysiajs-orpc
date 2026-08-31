@@ -1,13 +1,19 @@
-import type { ReviewResult, Severity } from './index.ts'
-import type { RiskLevel } from './policy.ts'
-import { blockingFindings } from './review.ts'
+import { aggregateReviews } from './aggregate.ts'
+import type { RiskLevel, Severity } from './policy.ts'
+import type { Finding, ReviewResult } from './review.ts'
 
 /**
  * What the automation has decided to do with a pull request.
  *
- * `blocked` is reserved for "automation stops, a human is needed". It is
- * deliberately distinct from `changes_requested`, which the fix loop can still
- * act on, so that a stalled loop is never mistaken for one still working.
+ * `blocked` means "automation has stopped on this pull request" — not "the loop
+ * has stopped". A blocked pull request leaves its issue labelled
+ * `agent:blocked` and the runner moves to independent work; only a person can
+ * unblock it, but nothing waits on them.
+ *
+ * `human_approval_required` is deliberately rare. Risk alone never produces it:
+ * a high-risk change is verified harder, not escalated to a person. It survives
+ * for the three cases where autonomy genuinely cannot decide — a fork, a change
+ * that weakens the loop's own protections, and an explicit human hold.
  */
 export type GateDecision =
   | 'auto_merge'
@@ -31,9 +37,20 @@ export interface CheckState {
   conclusion: CheckConclusion
 }
 
+/** Label a person can apply to take a pull request out of the loop's hands. */
+export const HUMAN_HOLD_LABEL = 'needs:human'
+
 export interface GateInput {
   risk: RiskLevel
-  review: ReviewResult
+  /**
+   * One entry per independent review pass that produced a usable result.
+   *
+   * A tier requiring two reviewers and receiving one is short of an opinion,
+   * not in possession of a favourable one — `aggregateReviews` blocks on that.
+   */
+  reviews: readonly ReviewResult[]
+  /** Independent review passes this risk tier demands. */
+  requiredReviewers: number
   /** Observed state of every check run reported on the head commit. */
   checks: readonly CheckState[]
   /** Checks that must succeed. Missing ones count as pending, never as passing. */
@@ -45,6 +62,21 @@ export interface GateInput {
   isFork: boolean
   isDraft: boolean
   blockingSeverity: Severity
+  /** Findings from the control-plane comparison. Non-empty means weakening. */
+  weakenedProtections?: readonly Finding[]
+  /** True when a person applied `needs:human`. */
+  humanHold?: boolean
+  /**
+   * Verification the runner performed locally, by tier.
+   *
+   * A step the tier requires that could not run — no Docker, for instance — is
+   * reported here as unavailable and blocks. "We could not check" is not a pass.
+   */
+  tierVerification?: {
+    ok: boolean
+    unavailable: readonly string[]
+    failed: readonly string[]
+  }
 }
 
 export interface GateOutcome {
@@ -56,6 +88,8 @@ export interface GateOutcome {
   reviewGate: 'success' | 'failure'
   /** Whether the coding agent should be asked to address findings. */
   shouldDispatchFix: boolean
+  /** The aggregated review, for the pull request comment. */
+  review: ReviewResult
 }
 
 const PENDING: ReadonlySet<CheckConclusion> = new Set(['pending', 'missing'])
@@ -92,7 +126,11 @@ function requiredCheckStates(input: GateInput): CheckState[] {
  * testable. It grants nothing on its own: the workflow acts on the outcome by
  * publishing check runs and, at most, asking GitHub to enable *its* auto-merge.
  * GitHub still enforces the required checks, so a bug here cannot merge a pull
- * request that the repository ruleset would refuse.
+ * request the repository ruleset would refuse.
+ *
+ * The order below is the safety argument. Everything that can stop a merge is
+ * evaluated before anything that can permit one, and each stop returns
+ * immediately, so no later branch can undo an earlier objection.
  */
 export function decideMerge(input: GateInput): GateOutcome {
   const reasons: string[] = []
@@ -105,26 +143,46 @@ export function decideMerge(input: GateInput): GateOutcome {
       check.conclusion === 'cancelled',
   )
   const pending = required.filter((check) => PENDING.has(check.conclusion))
-  const blocking = blockingFindings(input.review.findings, input.blockingSeverity)
 
-  const reviewGate: 'success' | 'failure' =
-    input.review.status === 'approve' && blocking.length === 0 ? 'success' : 'failure'
+  const aggregate = aggregateReviews({
+    reviews: input.reviews,
+    required: input.requiredReviewers,
+    blockingSeverity: input.blockingSeverity,
+  })
+  const review: ReviewResult = {
+    status: aggregate.status,
+    findings: aggregate.findings,
+    summary: aggregate.summary,
+  }
+
+  const weakened = input.weakenedProtections ?? []
+  const reviewGate: 'success' | 'failure' = aggregate.status === 'approve' ? 'success' : 'failure'
+
+  // The risk gate no longer asks whether a person approved. It asks whether the
+  // verification this risk tier demands actually happened and passed.
+  const tier = input.tierVerification
+  const tierUnavailable = tier?.unavailable ?? []
+  const tierFailed = tier?.failed ?? []
+  const tierOk = tier === undefined ? true : tier.ok
 
   const riskGate: 'success' | 'failure' =
-    input.isFork || (input.risk === 'high' && input.humanApprovals === 0) ? 'failure' : 'success'
+    input.isFork || weakened.length > 0 || !tierOk ? 'failure' : 'success'
 
-  if (reviewGate === 'failure') {
+  if (reviewGate === 'failure') reasons.push(...aggregate.reasons)
+  if (input.isFork) reasons.push('pull request originates from a fork')
+  if (weakened.length > 0) {
     reasons.push(
-      input.review.status === 'approve'
-        ? `${blocking.length} blocking finding(s) at or above ${input.blockingSeverity} severity`
-        : `review agent returned ${input.review.status}`,
+      `${weakened.length} control-plane protection(s) would be weakened: ${weakened
+        .map((finding) => finding.description)
+        .join('; ')}`,
     )
   }
-  if (riskGate === 'failure') {
+  if (tierFailed.length > 0) {
+    reasons.push(`\`${input.risk}\` tier verification failed: ${tierFailed.join(', ')}`)
+  }
+  if (tierUnavailable.length > 0) {
     reasons.push(
-      input.isFork
-        ? 'pull request originates from a fork'
-        : 'risk is high and no human approval is present',
+      `\`${input.risk}\` tier verification could not run: ${tierUnavailable.join(', ')}. An unrunnable check is not a passing one.`,
     )
   }
 
@@ -134,6 +192,7 @@ export function decideMerge(input: GateInput): GateOutcome {
     riskGate,
     reviewGate,
     shouldDispatchFix,
+    review,
   })
 
   if (input.isDraft) {
@@ -141,13 +200,36 @@ export function decideMerge(input: GateInput): GateOutcome {
     return outcome('waiting')
   }
 
-  if (input.review.status === 'blocked') {
-    reasons.unshift('review agent reported blocked')
+  // --- Stops that no amount of green can override -------------------------
+
+  if (input.humanHold === true) {
+    reasons.unshift(`a person applied \`${HUMAN_HOLD_LABEL}\``)
+    return outcome('human_approval_required')
+  }
+
+  if (input.isFork) {
+    // Fork code has never been trusted here and still is not: running the
+    // repository's own verification against it is exactly the thing that
+    // hands a stranger the credentials.
+    reasons.unshift('fork pull requests are never merged automatically')
+    return outcome('human_approval_required')
+  }
+
+  if (weakened.length > 0 && input.humanApprovals === 0) {
+    // The one case where autonomy genuinely cannot decide: the change makes the
+    // rules that govern autonomy weaker. Letting the loop approve that is
+    // letting it approve its own future approvals.
+    reasons.unshift('this change weakens the loop’s own protections')
+    return outcome('human_approval_required')
+  }
+
+  if (aggregate.status === 'blocked') {
+    reasons.unshift('independent review could not reach a usable verdict')
     return outcome('blocked')
   }
 
   const retriesExhausted = input.reviewAttempts >= input.maxReviewAttempts
-  const needsWork = reviewGate === 'failure' || failing.length > 0
+  const needsWork = reviewGate === 'failure' || failing.length > 0 || tierFailed.length > 0
 
   if (needsWork && retriesExhausted) {
     reasons.unshift(
@@ -156,24 +238,36 @@ export function decideMerge(input: GateInput): GateOutcome {
     return outcome('blocked')
   }
 
-  if (failing.length > 0) {
-    reasons.unshift(`required check(s) failing: ${failing.map((c) => c.name).join(', ')}`)
-    return outcome('changes_requested', !input.isFork)
+  if (tierUnavailable.length > 0) {
+    // Nothing the coding agent can do about a missing Docker daemon, so this is
+    // a block rather than a fix round. The runner moves to other work.
+    reasons.unshift('required verification could not be performed in this environment')
+    return outcome('blocked')
   }
 
-  if (reviewGate === 'failure') {
-    return outcome('changes_requested', !input.isFork)
+  // --- Things a fix round can address -------------------------------------
+
+  if (failing.length > 0) {
+    reasons.unshift(`required check(s) failing: ${failing.map((c) => c.name).join(', ')}`)
+    return outcome('changes_requested', true)
   }
+
+  if (tierFailed.length > 0) return outcome('changes_requested', true)
+  if (reviewGate === 'failure') return outcome('changes_requested', true)
 
   if (pending.length > 0) {
     reasons.unshift(`required check(s) not yet reported: ${pending.map((c) => c.name).join(', ')}`)
     return outcome('waiting')
   }
 
-  if (riskGate === 'failure') {
-    return outcome('human_approval_required')
-  }
+  // --- Everything the tier demands has passed ------------------------------
 
-  reasons.unshift('all required checks passed and the review agent approved')
+  reasons.unshift(
+    `all required checks passed, \`${input.risk}\` tier verification succeeded, and ${
+      aggregate.received === 1
+        ? 'the independent review approved'
+        : `all ${aggregate.received} independent reviews approved`
+    }`,
+  )
   return outcome('auto_merge')
 }

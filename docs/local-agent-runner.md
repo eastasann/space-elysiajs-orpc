@@ -110,17 +110,111 @@ claiming an issue and tells you which command to run.
 ### GitHub
 
 The runner uses the `gh` CLI you have already authenticated. It never handles a
-token itself, never prints one, and never asks for a personal access token. It
-verifies `gh auth status` before doing anything, and stops if it fails.
+token itself, never prints one, and never asks for a personal access token.
+
+Readiness is checked in three steps, because being logged in is not the same as
+being able to work on this repository:
+
+1. `gh` is on `PATH`.
+2. `gh auth status` and `gh api user` succeed — a credential exists and is
+   accepted.
+3. `gh api repos/{owner}/{name}` succeeds — that credential can actually read
+   **this** repository.
+
+Step 3 exists because step 2 passing on its own is a real failure mode: a
+sandbox, a proxy, or an org policy can serve `gh api user` and refuse every
+repository call. Without it the runner reports ready, claims an issue, and only
+then discovers it cannot open a pull request — leaving the issue labelled
+`agent:in-progress` and a worktree half built. Issue and pull request *write*
+permissions are not separately probed, because GitHub does not expose them
+without attempting a write, so a later permission failure is still possible;
+what this catches is the common case of no access at all.
+
+## Fully unattended mode
+
+This is the mode the repository is meant to run in.
+
+```bash
+bun run loop:watch --unattended
+```
+
+Leave it going. It selects an issue, implements it, verifies it to the depth its
+risk demands, reviews it independently, opens a pull request, asks GitHub to
+merge it, and starts the next one. Nothing in the happy path waits for a person.
+
+Two properties keep that safe rather than reckless:
+
+- **The runner never merges.** Its only merge call is
+  `gh pr merge --squash --auto`. GitHub decides whether the required checks
+  actually passed, so a bug here cannot produce a merge the ruleset would
+  refuse. A test scans this package's source to keep it that way — no
+  `--force`, no `--admin`, no ruleset edit, no direct REST merge.
+- **A stuck issue is not a stuck loop.** Every failure category is bounded.
+  Exhausting one marks that issue `agent:blocked`, comments why, and the loop
+  moves to independent work.
+
+### Risk tiers
+
+Risk decides how much verification a change must pass, not whether a person is
+summoned. All three merge automatically.
+
+| | Adds | Reviews |
+| --- | --- | --- |
+| `low` | format · lint · typecheck · test · build | 1 |
+| `medium` | dependency audit · end-to-end | 1 |
+| `high` | Docker smoke · load balancing · migration · loop self-test | **2** |
+
+Steps carrying `whenChanged` run only when the diff touches something they
+guard. A step that *cannot* run is `unavailable`, which blocks the issue rather
+than failing it: "could not check" and "checked, fine" are different answers and
+only one justifies a merge, but neither is the agent's fault.
+
+Availability is checked twice — `requires` for a binary on `PATH`, and
+`requiresProbe` for a command that must succeed. `docker` installed with a
+stopped daemon is the ordinary state of a laptop that rebooted; without the
+probe that would burn the issue's whole coding budget.
+
+### Block-and-continue
+
+```
+#10 exhausts its budget  →  agent:blocked, comment, loop moves on
+#11 depends on #10       →  skipped, label untouched, eligible again when #10 closes
+#12 independent          →  claimed and worked
+```
+
+### Budgets
+
+Unattended is not unlimited. Retry limits bound one issue; these bound the loop.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LOOP_MAX_MODEL_INVOCATIONS_PER_HOUR` | 60 | Claude calls in a rolling hour |
+| `LOOP_MAX_ISSUES_PER_DAY` | 20 | issues claimed in a rolling day |
+| `LOOP_MAX_RUNTIME_HOURS` | 12 | one session's wall clock |
+| `LOOP_MAX_CONSECUTIVE_FAILURES` | 8 | transient failures before giving up |
+
+Set any to `0` to disable it, deliberately.
+
+### Stopping and resuming
+
+Ctrl-C stops after the current step, releases the lock, and prints the summary
+(also written to `.loop/last-run.json`). After a restart:
+
+```bash
+bun run loop:status   # where everything stands
+bun run loop:once     # resumes rather than duplicating
+```
 
 ## Commands
 
 ```bash
-bun run loop:status              # what is ready, what is in flight, what is wrong
-bun run loop:once --dry-run      # what would happen; changes nothing
-bun run loop:once                # take one issue through to a pull request
-bun run loop:review 42           # advisory review on pull request #42
-bun run loop:watch               # drive open work and take new issues, on an interval
+bun run loop:status                     # mode, phase, backlog, external blockers
+bun run loop:once --dry-run             # the plan; changes nothing
+bun run loop:watch --unattended --dry-run
+bun run loop:once                       # one issue, then stop
+bun run loop:review 42                  # advisory review on pull request #42
+bun run loop:watch --unattended         # until there is nothing left to do
+bun run loop:watch --unattended --max-issues 2   # controlled validation
 ```
 
 Any of them accepts `--repo owner/name` to override the repository detected from
@@ -153,7 +247,11 @@ Takes **one** issue through the local coding phase:
    same policy the `loop-next-issue` workflow uses. The runner does not have its
    own eligibility rules.
 5. Claim it: `agent:ready` → `agent:in-progress`.
-6. Create `../.loop-worktrees/issue-N` on `agent/issue-N-short-description`.
+6. Create `../.loop-worktrees/issue-N` on `agent/issue-N-short-description`, and
+   run `bun install --frozen-lockfile` in it. A fresh worktree has no
+   `node_modules`, so without this every verification step fails for a reason
+   that has nothing to do with the change. `--frozen-lockfile` because an agent
+   must not quietly resolve a different dependency tree than CI will.
 7. Round loop, bounded by `LOCAL_AGENT_MAX_FIX_ROUNDS`:
    - a fresh Claude Code coding session,
    - the repository's own `lint`, `typecheck`, `test`, `build`,
@@ -203,8 +301,14 @@ All optional; the defaults are the conservative ones.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LOOP_MAX_ISSUES` | `1` | Issues taken in one `watch` session. `0` means unlimited and has to be set on purpose. |
-| `LOCAL_AGENT_MAX_FIX_ROUNDS` | `3` | Coding rounds per issue, counting the first. Bounds both the verification loop and the review loop. |
+| `LOOP_UNATTENDED` | `false` | Keep taking issues until a global stop condition. `--unattended` sets it. |
+| `LOOP_MAX_ISSUES` | 1 attended, unlimited unattended | Issues taken in one run. `0` means unlimited. |
+| `LOOP_CODING_FIX_ROUNDS` | `3` | Implementation attempts against failing verification or review. |
+| `LOOP_REVIEW_FIX_ROUNDS` | `3` | Attempts at addressing review findings. |
+| `LOOP_CI_FIX_ROUNDS` | `3` | Attempts at addressing failing CI. |
+| `LOOP_REVIEWER_RETRY_ROUNDS` | `2` | Retries of a reviewer returning unusable output. |
+| `LOOP_CONFLICT_ROUNDS` | `2` | Attempts at resolving a merge conflict. |
+| `LOOP_REVIEWER_B_MODEL` | *(empty)* | Optional different model for the second reviewer. |
 | `LOOP_WORKTREE_ROOT` | `../.loop-worktrees` | Where isolated worktrees go, relative to the repository. |
 | `LOOP_POLL_INTERVAL_SECONDS` | `60` | Watch-mode polling interval. Minimum 30. |
 | `LOOP_AGENT_TIMEOUT_MINUTES` | `45` | Wall-clock ceiling on one Claude invocation. |

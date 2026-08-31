@@ -182,6 +182,102 @@ describe('C — the coding agent succeeds', () => {
   })
 })
 
+describe('C2 — a fresh worktree gets its dependencies', () => {
+  test('installs before anything is verified, and blocks when that fails', async () => {
+    const sandbox = await createSandbox()
+    try {
+      const gh = fakeGh({ issues: [issueFixture(40, 'Needs deps')] })
+      const order: string[] = []
+      const coding = scriptedCodingAgent([
+        (task) => {
+          order.push('code')
+          return write(task, 'a.ts', 'export const j = 10\n')
+        },
+      ])
+
+      const deps = testDeps({
+        repository: sandbox.repository,
+        gh,
+        coding,
+        review: scriptedReviewAgent([approvingReview()]),
+        installer: async (command, args) => {
+          order.push(`${command} ${args.join(' ')}`)
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'lockfile is out of date',
+            timedOut: false,
+            display: '',
+          }
+        },
+        verifier: async () => {
+          order.push('verify')
+          return passingVerification()
+        },
+      })
+
+      const outcome = await workIssue(deps, {
+        number: 40,
+        title: 'Needs deps',
+        state: 'open',
+        labels: ['agent:ready'],
+        body: 'Install them.',
+      })
+
+      // A failed install stops the run before the agent is even asked to work,
+      // rather than letting every check fail for an unrelated reason.
+      expect(outcome.status).toBe('blocked')
+      expect(outcome.detail).toContain('lockfile is out of date')
+      expect(order).toEqual(['bun install --frozen-lockfile'])
+      expect(coding.rounds).toHaveLength(0)
+      expect(gh.labelsOf(40)).toEqual(['agent:blocked'])
+    } finally {
+      await sandbox.cleanup()
+    }
+  })
+
+  test('installs once, before the first coding round', async () => {
+    const sandbox = await createSandbox()
+    try {
+      const gh = fakeGh({ issues: [issueFixture(41, 'Order matters')] })
+      const order: string[] = []
+      const coding = scriptedCodingAgent([
+        (task) => {
+          order.push('code')
+          return write(task, 'b.ts', 'export const k = 11\n')
+        },
+      ])
+
+      const deps = testDeps({
+        repository: sandbox.repository,
+        gh,
+        coding,
+        review: scriptedReviewAgent([approvingReview()]),
+        installer: async (command, args) => {
+          order.push(`${command} ${args.join(' ')}`)
+          return { code: 0, stdout: '', stderr: '', timedOut: false, display: '' }
+        },
+        verifier: async () => {
+          order.push('verify')
+          return passingVerification()
+        },
+      })
+
+      await workIssue(deps, {
+        number: 41,
+        title: 'Order matters',
+        state: 'open',
+        labels: ['agent:ready'],
+        body: 'Order it.',
+      })
+
+      expect(order).toEqual(['bun install --frozen-lockfile', 'code', 'verify'])
+    } finally {
+      await sandbox.cleanup()
+    }
+  })
+})
+
 describe('D — verification fails', () => {
   test('runs a bounded fix loop and blocks when it is spent', async () => {
     const sandbox = await createSandbox()
@@ -344,7 +440,7 @@ describe('F — a malformed review', () => {
 })
 
 describe('G — a high-risk change', () => {
-  test('is classified high and reported as a human gate', async () => {
+  test('is classified high, dual-reviewed, and merged without a person', async () => {
     const sandbox = await createSandbox()
     try {
       const gh = fakeGh({ issues: [issueFixture(12, 'Touch the loop')] })
@@ -368,7 +464,11 @@ describe('G — a high-risk change', () => {
       })
 
       expect(outcome.risk?.risk).toBe('high')
-      expect(outcome.detail).toContain('waits for a human')
+      // High risk no longer summons a person; it buys two independent reviews
+      // and the strongest verification, and then merges like anything else.
+      expect(outcome.status).toBe('opened')
+      expect(outcome.detail).toContain('auto-merge requested')
+      expect(gh.autoMerged).toEqual([100])
 
       const journal = await readJournal(join(sandbox.repository, '.loop', 'state.json'))
       expect(journal.runs[0]?.risk).toBe('high')
@@ -426,10 +526,13 @@ describe('G — a high-risk change', () => {
       })
 
       const [outcome] = await advance(deps)
-      expect(outcome?.action).toBe('awaiting-human')
-      expect(outcome?.detail).toContain('High risk')
-      // The runner has no merge call at all, so nothing merged.
-      expect(gh.calls.some((call) => call.includes('merge'))).toBe(false)
+
+      // The philosophy change: high risk is green and waiting on GitHub's own
+      // auto-merge, not on a person.
+      expect(outcome?.action).toBe('awaiting-merge')
+      expect(outcome?.detail).toContain('auto-merge')
+      // The runner still has no merge call of its own.
+      expect(gh.calls.some((call) => call.startsWith('merge('))).toBe(false)
     } finally {
       await sandbox.cleanup()
     }
@@ -715,7 +818,7 @@ describe('J — dry run', () => {
       expect(plan.selected?.number).toBe(30)
       expect(plan.branch).toBe('agent/issue-30-preview-me')
       expect(plan.worktree).toContain('.loop-worktrees')
-      expect(plan.verification).toContain('bun run test')
+      expect(plan.order.some((entry) => entry.issue === 30 && entry.eligible)).toBe(true)
 
       // Nothing was claimed, commented, created, or run.
       expect(gh.labelsOf(30)).toEqual(['agent:ready'])
