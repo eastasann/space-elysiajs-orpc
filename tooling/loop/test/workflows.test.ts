@@ -546,15 +546,44 @@ describe('the loop keeps going after it merges something', () => {
   })
 
   it('only announces a merge that actually happened', () => {
-    // The dispatch must sit after the merge call, and the failure path must
-    // return before reaching it, or a refused merge would still claim success
-    // and the loop would move on from an issue it never shipped.
-    const declined = script.indexOf('declined the merge')
+    // The dispatch must be reached only on the path that merged, or the loop
+    // would move on from an issue it never shipped.
     const dispatch = script.indexOf('createWorkflowDispatch')
+    const notMerged = script.indexOf('if (!merged)')
 
-    expect(declined).toBeGreaterThanOrEqual(0)
-    expect(declined, 'the refusal path comes first').toBeLessThan(dispatch)
-    expect(script.slice(declined, dispatch)).toContain('return')
+    expect(notMerged).toBeGreaterThanOrEqual(0)
+    expect(notMerged, 'the unmerged path is handled first').toBeLessThan(dispatch)
+    expect(script.slice(notMerged, dispatch), 'and returns before the dispatch').toContain('return')
+  })
+
+  // Both reviewers on #42 caught this: the dispatch sat only after the direct
+  // merge, while the auto-merge branch returned before ever reaching it. So a
+  // merge GitHub completed later went unannounced — the exact #40 stall the
+  // code claimed to fix. Deferring the merge and announcing it in the same run
+  // are incompatible, so the direct merge has to come first.
+  it('merges directly before falling back to auto-merge', () => {
+    const direct = script.indexOf('pulls.merge')
+    const deferred = script.indexOf('enablePullRequestAutoMerge')
+
+    expect(direct).toBeGreaterThanOrEqual(0)
+    expect(direct, 'the announceable path is attempted first').toBeLessThan(deferred)
+  })
+
+  // updateBranch was the only unguarded write in the step. A 422 from a moved
+  // head would throw, failing the job and leaving the pull request stalled
+  // behind with a red run as the only symptom.
+  it('guards every write against a refusal', () => {
+    // Each write is followed by a catch before the next one begins, so a
+    // refusal degrades to a warning instead of failing the job.
+    for (const call of ['updateBranch', 'pulls.merge', 'enablePullRequestAutoMerge']) {
+      const at = script.indexOf(call)
+      expect(at, `${call} is present`).toBeGreaterThanOrEqual(0)
+      expect(script.slice(at), `${call} is followed by a catch`).toContain('} catch')
+    }
+
+    // Three writes, three guards.
+    const catches = script.match(/\}\s*catch/g) ?? []
+    expect(catches.length).toBeGreaterThanOrEqual(3)
   })
 })
 
