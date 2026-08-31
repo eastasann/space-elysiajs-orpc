@@ -116,12 +116,48 @@ describe('permissions', () => {
     }
   })
 
-  it('does not grant contents: write, so the loop cannot push to a branch itself', () => {
+  // The invariant is that the loop cannot author a commit, not that no job ever
+  // holds the permission: asking GitHub to merge needs `contents: write`, and
+  // the gate hit "Resource not accessible by integration" without it. So a job
+  // may hold it only if it cannot use it to push — no checkout, therefore no
+  // working tree, no repository code and no agent, and only `github-script`
+  // steps. Granting it to the gate job, which runs both, would give that away.
+  it('grants contents: write only to a job that cannot push', () => {
     for (const { file, doc } of loopWorkflows) {
       for (const [name, job] of Object.entries(doc.jobs ?? {})) {
         const permissions = job.permissions as Record<string, string> | undefined
-        expect(`${file}#${name}`).toBeTruthy()
-        expect(permissions?.contents ?? 'read').toBe('read')
+        if ((permissions?.contents ?? 'read') === 'read') continue
+
+        const where = `${file}#${name}`
+        const steps = job.steps ?? []
+
+        expect(permissions?.contents, where).toBe('write')
+        expect(
+          steps.every((step) => step.uses?.startsWith('actions/github-script@') === true),
+          `${where}: every step must be github-script`,
+        ).toBe(true)
+        expect(
+          steps.some((step) => step.uses?.startsWith('actions/checkout') === true),
+          `${where}: must not check anything out`,
+        ).toBe(false)
+        expect(
+          steps.some((step) => step.run !== undefined),
+          `${where}: must run no shell`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('keeps the write permission off the job that runs the agent', () => {
+    for (const { file, doc } of loopWorkflows) {
+      for (const [name, job] of Object.entries(doc.jobs ?? {})) {
+        const runsAnAgent = (job.steps ?? []).some((step) =>
+          step.uses?.startsWith('anthropics/claude-code-action'),
+        )
+        if (!runsAnAgent) continue
+
+        const permissions = job.permissions as Record<string, string> | undefined
+        expect(permissions?.contents ?? 'read', `${file}#${name}`).toBe('read')
       }
     }
   })
