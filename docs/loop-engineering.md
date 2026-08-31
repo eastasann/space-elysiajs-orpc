@@ -192,6 +192,23 @@ only in the runner's temp directory.
 A resumed run starts at `fixRounds + 1`, so restarting the runner cannot hand
 the agent a fresh budget.
 
+### Recurrence across fix rounds
+
+A retry budget of three is only useful if each round tries something the last
+one had not. The sticky comment's `history` retains, per round that requested
+changes, the findings at or above the blocking severity — compactly, and only
+for rounds that actually asked for a fix, so the comment cannot grow without
+bound over the small number of rounds the policy allows.
+
+Each new round's findings are matched against that history
+([`recurrence.ts`](../tooling/loop/src/recurrence.ts)) on file path plus the
+significant words in the description, not on exact text — the review agent is
+a fresh, non-deterministic session each time and never phrases the same defect
+identically twice. A finding that matches one from an earlier, different head
+commit is reported in the comment as recurring, naming the attempt and head
+sha it survived, so a fix round knows to `git diff` those heads and see what
+was tried rather than guessing again.
+
 ### Operational budgets
 
 Unattended is not unlimited. Retry limits bound one issue; these bound the loop.
