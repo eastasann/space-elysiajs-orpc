@@ -632,8 +632,23 @@ jobs:
             }
 
             if (!merged) {
-              // Something required is still pending. Hand it to GitHub, which
-              // holds the pull request until the ruleset is satisfied.
+              // The merge may have failed because it had already happened.
+              // GitHub's own auto-merge reacts to the same check-completion
+              // event and completes far faster than a fresh Actions run can
+              // queue, check out and start, so whenever an earlier run enabled
+              // auto-merge, this run can lose that race and see `already
+              // merged` here. Treating that as "still pending" would enable
+              // auto-merge as a no-op and return without announcing — the #40
+              // stall again, on the one path the fallback exists to serve.
+              const { data: now } = await github.rest.pulls.get({ owner, repo, pull_number })
+              if (now.merged) {
+                core.info('GitHub merged it while this run was working; announcing it.')
+                await announce()
+                return
+              }
+
+              // Genuinely still pending. Hand it to GitHub, which holds the
+              // pull request until the ruleset is satisfied.
               //
               // The merge that follows is not announced by this run, and cannot
               // be. It does not strand the pull request: whatever is still

@@ -562,6 +562,23 @@ describe('the loop keeps going after it merges something', () => {
     expect(permissions?.actions).toBe('write')
   })
 
+  // A reviewer traced the race: GitHub's auto-merge reacts to the same check
+  // event and finishes before a fresh Actions run can start, so this run's own
+  // merge call can fail with "already merged". Reading that as "still pending"
+  // enables auto-merge as a no-op and returns without announcing.
+  it('announces a merge that beat this run to it', () => {
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const at = code.indexOf('if (!merged)')
+    const branch = code.slice(at, code.indexOf('\n}', at))
+
+    expect(branch, 're-reads the pull request').toContain('pulls.get')
+    expect(branch, 'and announces when it turns out merged').toContain('announce()')
+  })
+
   it('only announces a merge that actually happened', () => {
     // The unmerged path must return without announcing, or the loop would move
     // on from an issue it never shipped. Asserted against the branch itself
@@ -579,7 +596,13 @@ describe('the loop keeps going after it merges something', () => {
     // a brace at column zero, not at the indentation seen in the file.
     const branch = code.slice(at, code.indexOf('\n}', at))
     expect(branch, 'it returns').toContain('return')
-    expect(branch, 'without announcing').not.toContain('announce()')
+
+    // The branch may announce, but only after re-reading and finding the pull
+    // request merged. Once it has decided the merge is genuinely still pending
+    // and hands over to auto-merge, nothing after that may announce: the merge
+    // has not happened, and this run will never see it.
+    const deferred = branch.slice(branch.indexOf('enablePullRequestAutoMerge'))
+    expect(deferred, 'the deferred tail announces nothing').not.toContain('announce()')
   })
 
   // Both reviewers on #42 caught this: the dispatch sat only after the direct
