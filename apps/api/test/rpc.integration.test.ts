@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { type ApiClient, SystemStatusSchema } from '@newsdeck/api-contract'
 import { createLocalAuthProvider } from '@newsdeck/auth'
 import { createDatabase, type DatabaseHandle, runMigrations } from '@newsdeck/db'
+import { sources } from '@newsdeck/db/schema'
 import {
   createRedisConnection,
   createSystemQueue,
@@ -12,6 +13,9 @@ import {
 import { REQUEST_ID_HEADER } from '@newsdeck/logger'
 import { createORPCClient } from '@orpc/client'
 import { RPCLink } from '@orpc/client/fetch'
+import { sql } from 'drizzle-orm'
+import { createSourcesRepository } from '../src/modules/sources/repository.ts'
+import { createSourcesService } from '../src/modules/sources/service.ts'
 import { createSystemRepository } from '../src/modules/system/repository.ts'
 import { createSystemService } from '../src/modules/system/service.ts'
 import { buildServer } from '../src/server.ts'
@@ -43,6 +47,8 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
   beforeAll(async () => {
     database = createDatabase({ url: TEST_DATABASE_URL as string, maxConnections: 2 })
     await runMigrations(database)
+    // Isolates this file's sources assertions from rows left by other suites.
+    await database.db.execute(sql`truncate table ${sources} restart identity cascade`)
 
     redis = createRedisConnection({ url: TEST_REDIS_URL as string, clientName: 'api-itest' })
     queue = createSystemQueue(redis, NAMESPACE)
@@ -66,6 +72,7 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
           startedAt: Date.now() - 5_000,
           namespace: NAMESPACE,
         }),
+        sources: createSourcesService(createSourcesRepository(database)),
       },
     })
 
@@ -129,5 +136,19 @@ describe.skipIf(!canRun)('oRPC over the real stack', () => {
 
     expect(status.worker?.instanceId).toBe('worker-itest')
     expect(status.worker?.ageSeconds).toBeLessThan(10)
+  })
+
+  it('creates a source and lists it back through the real database', async () => {
+    const created = await client.sources.create({
+      name: 'Example Feed',
+      feedUrl: 'https://example.test/rpc-integration-feed.xml',
+    })
+
+    expect(created.name).toBe('Example Feed')
+    expect(created.isActive).toBe(true)
+
+    const page = await client.sources.list({})
+
+    expect(page.items.map((item) => item.id)).toContain(created.id)
   })
 })

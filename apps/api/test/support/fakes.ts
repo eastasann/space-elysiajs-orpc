@@ -1,7 +1,9 @@
 import type { SystemStatus } from '@newsdeck/api-contract'
 import { createLogger, type Logger } from '@newsdeck/logger'
 import type { AppServices } from '../../src/context.ts'
+import { createSourcesService, type SourcesService } from '../../src/modules/sources/service.ts'
 import type { SystemService } from '../../src/modules/system/service.ts'
+import { fakeSourcesRepository } from './fake-sources-repository.ts'
 
 export function silentLogger(): Logger {
   return createLogger({
@@ -53,6 +55,9 @@ export function fakeSystemService(options: {
   }
 }
 
-export function fakeServices(system: SystemService): AppServices {
-  return { system }
+export function fakeServices(
+  system: SystemService,
+  sources: SourcesService = createSourcesService(fakeSourcesRepository()),
+): AppServices {
+  return { system, sources }
 }

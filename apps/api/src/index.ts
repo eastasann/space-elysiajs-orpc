@@ -12,6 +12,8 @@ import { createDatabase } from '@newsdeck/db'
 import { createRedisConnection, createSystemQueue } from '@newsdeck/jobs'
 import { createLogger } from '@newsdeck/logger'
 import { apiEnvSchema } from './env.ts'
+import { createSourcesRepository } from './modules/sources/repository.ts'
+import { createSourcesService } from './modules/sources/service.ts'
 import { createSystemRepository } from './modules/system/repository.ts'
 import { createSystemService } from './modules/system/service.ts'
 import { buildServer } from './server.ts'
@@ -45,6 +47,7 @@ const server = buildServer({
       instanceId,
       startedAt,
     }),
+    sources: createSourcesService(createSourcesRepository(database)),
   },
 })
 

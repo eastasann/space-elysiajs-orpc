@@ -1,10 +1,12 @@
 import type { AuthIdentity } from '@newsdeck/auth'
 import type { Logger } from '@newsdeck/logger'
+import type { SourcesService } from './modules/sources/service.ts'
 import type { SystemService } from './modules/system/service.ts'
 
 /** Application services, constructed once per process and shared per request. */
 export interface AppServices {
   system: SystemService
+  sources: SourcesService
 }
 
 /**
