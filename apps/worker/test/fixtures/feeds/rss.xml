@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Example RSS Feed</title>
+    <link>https://example.test/</link>
+    <description>An example feed for tests.</description>
+    <item>
+      <title>Council approves &lt;b&gt;new&lt;/b&gt; budget</title>
+      <link>https://Example.test:443/news/budget?utm_source=newsletter&amp;utm_campaign=weekly&amp;ref=front-page#top</link>
+      <description>&lt;p&gt;The council voted 5-2 to approve the budget.  Extra   whitespace   here.&lt;/p&gt;</description>
+      <author>editor@example.test (Jane Doe)</author>
+      <enclosure url="https://example.test/images/budget.jpg" type="image/jpeg" length="123456" />
+      <pubDate>Mon, 01 Jan 2024 12:00:00 GMT</pubDate>
+      <guid>https://example.test/news/budget</guid>
+    </item>
+    <item>
+      <title>Second story, syndicated</title>
+      <link>https://example.test/news/second</link>
+      <description>Reported first by a wire service.</description>
+      <dc:creator>Wire Service</dc:creator>
+      <media:thumbnail url="https://example.test/images/second.jpg" />
+      <pubDate>not a real date</pubDate>
+    </item>
+  </channel>
+</rss>
