@@ -1,0 +1,26 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Example JSON Feed",
+  "home_page_url": "https://example.test/",
+  "feed_url": "https://example.test/feed.json",
+  "items": [
+    {
+      "id": "https://example.test/articles/one",
+      "url": "https://EXAMPLE.test/articles/one?utm_campaign=launch&fbclid=xyz",
+      "title": "  Launch day recap  ",
+      "content_html": "<p>It went well.</p>",
+      "authors": [{ "name": "Priya Nair" }],
+      "image": "https://example.test/images/one.jpg",
+      "date_published": "2024-03-05T10:15:00Z"
+    },
+    {
+      "id": "https://example.test/articles/two",
+      "url": "https://example.test/articles/two",
+      "title": "Second article",
+      "summary": "A short summary takes priority over content_text.",
+      "content_text": "This should not be used because summary is present.",
+      "author": { "name": "Legacy Author Field" },
+      "date_modified": "2024-03-06T00:00:00Z"
+    }
+  ]
+}

@@ -15,7 +15,8 @@
       "!**/.turbo",
       "!**/routeTree.gen.ts",
       "!**/bun.lock",
-      "!**/drizzle"
+      "!**/drizzle",
+      "!**/test/fixtures"
     ]
   },
   "formatter": {

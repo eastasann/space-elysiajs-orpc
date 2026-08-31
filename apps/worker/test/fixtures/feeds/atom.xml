@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <id>https://example.test/atom</id>
+  <updated>2024-02-01T00:00:00Z</updated>
+  <entry>
+    <title type="html">Storm &amp;amp; flooding warning issued</title>
+    <link rel="self" href="https://example.test/feeds/atom/storm" />
+    <link rel="alternate" href="https://Example.test/weather/storm?utm_medium=email&amp;gclid=abc123" />
+    <summary>&lt;p&gt;Residents near the river should prepare to evacuate.&lt;/p&gt;</summary>
+    <author>
+      <name>Alex Rivera</name>
+    </author>
+    <published>2024-02-01T08:30:00</published>
+  </entry>
+  <entry>
+    <title>Second entry, content only</title>
+    <link href="https://example.test/weather/second" />
+    <content type="html">&lt;div&gt;Full content used as summary, since there is no summary element.&lt;/div&gt;</content>
+    <updated>2024-02-02T09:00:00+02:00</updated>
+  </entry>
+</feed>

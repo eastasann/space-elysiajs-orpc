@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Feed with bad entries</title>
+    <item>
+      <title>Missing a link</title>
+      <description>This entry has no link element at all.</description>
+    </item>
+    <item>
+      <link>https://example.test/no-title</link>
+      <description>This entry has no title element at all.</description>
+    </item>
+    <item>
+      <title>   </title>
+      <link>https://example.test/blank-title</link>
+    </item>
+    <item>
+      <title>Good entry</title>
+      <link>https://example.test/good</link>
+    </item>
+  </channel>
+</rss>
