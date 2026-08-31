@@ -60,6 +60,14 @@ env:
   # Checks that must succeed before an automatic merge. Keep in step with the
   # job names in ci.yml and with the repository ruleset.
   LOOP_REQUIRED_CHECKS: ${{ vars.LOOP_REQUIRED_CHECKS || 'Lint and types,Tests,Build,End-to-end' }}
+  # The review agent runs on a Claude subscription token, not an API key. Its
+  # presence is the whole configuration: no separate provider variable to keep in
+  # step with it, and no way for the two to disagree.
+  REVIEW_AGENT_AVAILABLE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+  # Bots whose events may start a review. The loop's own events come from the
+  # Claude GitHub App and from github-actions; the action allows no bot by
+  # default, and '*' would let any installed App trigger it, so both are named.
+  LOOP_ALLOWED_BOTS: ${{ vars.LOOP_ALLOWED_BOTS || 'claude[bot],github-actions[bot]' }}
 
 jobs:
   gate:
@@ -284,45 +292,62 @@ jobs:
         run: bun tooling/loop/bin/review-prompt.ts
 
       # --- Review agent -----------------------------------------------------
-      # Disabled unless a provider is configured. With no provider the
-      # evaluation below sees no review output and reports `blocked`, which
-      # prevents an automatic merge and asks for a human. That is the intended
-      # default: this repository ships the orchestration, not the model.
+      # Runs on the Claude Code GitHub Action, authenticated with a Claude
+      # subscription through `claude_code_oauth_token`. No Anthropic API key is
+      # involved: the action's documentation states that with an OAuth token
+      # "runs use your Claude subscription instead of API billing".
       #
-      # NOT VERIFIED IN THIS REPOSITORY. Before setting the variable, confirm
-      # the action reference and that it writes its answer to the path below.
+      # The prompt is a skill committed at `.claude/skills/loop-review/`, so the
+      # reviewer's instructions live in the repository and are reviewed like any
+      # other code. The skill writes a JSON verdict to a file, which the gate
+      # validates against `ReviewResultSchema` before reading a single field.
+      #
+      # `continue-on-error` is deliberate. A reviewer that crashes must not fail
+      # the job — it must produce no file, so the aggregate sees fewer reviews
+      # than the tier requires and blocks. Failing the job here would lose that
+      # distinction.
       - name: Run the review agent
         id: review_agent
-        if: steps.resolve.outputs.found == 'true' && vars.LOOP_REVIEW_PROVIDER == 'claude-code-action'
+        if: steps.resolve.outputs.found == 'true' && env.REVIEW_AGENT_AVAILABLE == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt_file: .loop/prompt.md
-          output_file: .loop/review.txt
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The loop's own events are raised by the Claude GitHub App and by
+          # github-actions, both bots. Without this the action refuses to run at
+          # all — its default is to allow no bot actor.
+          allowed_bots: ${{ env.LOOP_ALLOWED_BOTS }}
+          prompt: >-
+            /loop-review ${{ github.repository }}
+            ${{ steps.resolve.outputs.number }} .loop/review-a.json
+          claude_args: --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue view *)"
 
-      # Second, independent pass. Runs only for the high tier, and only when a
-      # provider is configured. A separate action invocation is a separate
-      # session: a reviewer that shared the first one's context would be
-      # confirming its own conclusions rather than checking them.
+      # Second, independent pass, for the high tier only. A separate action step
+      # is a separate Claude Code session with no shared context: a reviewer that
+      # continued the first one's conversation would be confirming its own
+      # conclusions rather than checking them.
       - name: Run the second review agent
         id: review_agent_b
         if: >-
           steps.resolve.outputs.found == 'true' &&
-          vars.LOOP_REVIEW_PROVIDER == 'claude-code-action' &&
-          steps.classify.outputs.risk == 'high'
+          env.REVIEW_AGENT_AVAILABLE == 'true' &&
+          steps.classify.outputs.reviewers != '1'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt_file: .loop/prompt.md
-          output_file: .loop/review-b.txt
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: ${{ env.LOOP_ALLOWED_BOTS }}
+          prompt: >-
+            /loop-review ${{ github.repository }}
+            ${{ steps.resolve.outputs.number }} .loop/review-b.json
+          claude_args: --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue view *)"
 
       - name: Record that no review agent ran
-        if: steps.resolve.outputs.found == 'true' && vars.LOOP_REVIEW_PROVIDER != 'claude-code-action'
+        if: steps.resolve.outputs.found == 'true' && env.REVIEW_AGENT_AVAILABLE != 'true'
         run: |
-          echo "No review agent provider configured (vars.LOOP_REVIEW_PROVIDER is unset)." >&2
+          echo "No CLAUDE_CODE_OAUTH_TOKEN secret is set, so no review agent ran." >&2
           echo "The gate will report 'blocked'. A missing review is never an approval." >&2
+          echo "Generate a token with 'claude setup-token' and add it as a repository secret." >&2
 
       - name: Evaluate the gate
         id: evaluate
@@ -333,10 +358,13 @@ jobs:
           # Colon-separated, one path per independent pass. The high tier needs
           # two; a path that is listed but absent counts as a reviewer that did
           # not run, which reduces the count the aggregate sees.
+          # Colon-separated, one path per independent pass the tier requires. A
+          # path that is listed but absent is a reviewer that did not produce a
+          # usable result, which lowers the count the aggregate sees and blocks.
           LOOP_REVIEW_OUTPUT: >-
-            ${{ vars.LOOP_REVIEW_PROVIDER == '' && ''
-            || (steps.classify.outputs.risk == 'high' && '.loop/review.txt:.loop/review-b.txt'
-            || '.loop/review.txt') }}
+            ${{ env.REVIEW_AGENT_AVAILABLE != 'true' && ''
+            || (steps.classify.outputs.reviewers != '1' && '.loop/review-a.json:.loop/review-b.json'
+            || '.loop/review-a.json') }}
           LOOP_PROPOSED_POLICY: ${{ steps.proposed_policy.outputs.found == 'true' && '.loop/proposed-policy.json' || '' }}
           LOOP_POLICY: .github/loop-policy.json
         run: bun tooling/loop/bin/evaluate-pr.ts

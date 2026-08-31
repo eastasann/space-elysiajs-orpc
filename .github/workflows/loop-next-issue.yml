@@ -14,7 +14,7 @@ on:
       dispatch_agent:
         description: 'Ask the coding agent to start the selected issue'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions: {}
@@ -126,8 +126,13 @@ jobs:
       - name: Write the job summary
         run: cat "$LOOP_OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
+      # Unattended by default: a merge lands, the next eligible issue is picked,
+      # and the coding agent starts. `workflow_dispatch` can still suppress it
+      # for a manual run by passing dispatch_agent=false.
       - name: Dispatch the coding agent
-        if: steps.select.outputs.has_selection == 'true' && inputs.dispatch_agent
+        if: >-
+          steps.select.outputs.has_selection == 'true' &&
+          (github.event_name != 'workflow_dispatch' || inputs.dispatch_agent)
         uses: actions/github-script@v7
         env:
           SELECTED: ${{ steps.select.outputs.selected }}

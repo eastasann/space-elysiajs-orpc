@@ -215,6 +215,66 @@ The session ends only when:
 A single failed issue is not one of them. Neither is a `risk:high` issue, nor a
 pull request awaiting review — the system performs that review itself.
 
+### Where the agents run
+
+Both agents are **Claude Code cloud executions in GitHub Actions**, through
+[`anthropics/claude-code-action@v1`](https://github.com/anthropics/claude-code-action),
+authenticated with `claude_code_oauth_token`. The action's documentation is
+explicit: *"If you authenticate with an OAuth token, runs use your Claude
+subscription instead of API billing."*
+
+So:
+
+- **No Anthropic API key.** One repository secret, `CLAUDE_CODE_OAUTH_TOKEN`,
+  from `claude setup-token`.
+- **No local machine and no local clone.** Nothing has to be awake.
+- **No persistent process.** Each event starts a fresh execution.
+
+The instructions are skills committed under `.claude/skills/`, so a prompt that
+decides what an autonomous agent does is reviewed like any other code:
+
+| Skill | Invoked as | Does |
+| --- | --- | --- |
+| `loop-implement` | `/loop-implement owner/repo N` | implements one issue, opens the pull request |
+| `loop-fix` | `/loop-fix owner/repo N` | addresses review findings or failing CI on an open pull request |
+| `loop-review` | `/loop-review owner/repo N path` | reviews a pull request, writes a JSON verdict to `path` |
+
+`loop-review` writes its verdict to a file rather than a comment, and the gate
+validates it against `ReviewResultSchema` before reading a field. A missing or
+malformed file is `blocked`, never an approval — which is why the review steps
+carry `continue-on-error: true`. A reviewer that crashes must *produce no
+verdict*, so the aggregate sees fewer reviews than the tier requires and
+withholds the merge. Failing the job instead would lose the distinction between
+"reviewed and objected" and "never ran".
+
+High risk runs the action **twice**, as two separate steps. Two steps are two
+Claude Code sessions with no shared context — a reviewer continuing the first
+one's conversation would be confirming its own conclusions rather than checking
+them.
+
+### What starts each execution
+
+Every step of the loop is a GitHub event, and Actions can trigger the agent on
+any of them:
+
+| Moment | Event | Starts |
+| --- | --- | --- |
+| An issue is ready | `push` to `main` after a merge → `loop-next-issue.yml` | coding agent |
+| A pull request opens | `workflow_run` on CI → `loop-pr.yml` | review agent |
+| CI finishes | `workflow_run` | review agent, then the gate |
+| Review requests changes | the gate dispatches `loop-agent-dispatch.yml` | fix round |
+| A pull request merges | `push` to `main` | next issue |
+
+Two things make that chain actually close:
+
+- The action authenticates as the **Claude GitHub App**, not with
+  `GITHUB_TOKEN`. GitHub raises no workflow events for `GITHUB_TOKEN` pushes, so
+  an agent that used it would open pull requests nothing ever ran on.
+- `allowed_bots` names `claude[bot]` and `github-actions[bot]`. The action
+  rejects every bot actor by default, which would otherwise stop the second link
+  in the chain. It is a named list rather than `*` because `*` lets any
+  installed App drive the agent with a prompt it controls.
+
 ### Commands
 
 ```bash
@@ -768,24 +828,16 @@ reference, its inputs, and that it opens a pull request before enabling it.
 
 The same applies to `LOOP_REVIEW_PROVIDER` in `loop-pr.yml`.
 
-### Or run the agent locally instead
+### Running the agents locally instead
 
-`loop-agent-dispatch.yml` is not the only way to connect an agent, and it is not
-the one this repository actually uses. The supported path is the **local
-runner**: Claude Code on a developer's own machine, authenticated with their own
-subscription, producing ordinary pull requests that this control plane then
-gates.
+The [local runner](./local-agent-runner.md) is the alternative, not the default.
+It does the same work from a developer's own machine with `loop:watch
+--unattended`, and it exists for two cases: working offline, and debugging a
+loop cycle with a live console. It needs a clone and a machine that stays awake,
+which the cloud path does not.
 
-```bash
-bun run loop:status
-bun run loop:once --dry-run
-bun run loop:once
-```
-
-Nothing about the control plane changes. The runner arrives at exactly the point
-`loop-agent-dispatch.yml` would have — a pull request with `Closes #N` on an
-`agent/issue-*` branch — and everything after that is identical. See
-[local-agent-runner.md](./local-agent-runner.md).
+Both produce the same thing — an `agent/issue-*` branch and a pull request — and
+the control plane cannot tell them apart.
 
 ---
 
@@ -816,17 +868,15 @@ a human.
 
 Stated plainly, so nothing here reads as a claim it is not:
 
-- **Agent invocation from GitHub Actions.** No hosted runner is connected;
-  `loop-agent-dispatch.yml` is a boundary, not a provider. The
-  [local runner](./local-agent-runner.md) is the connected path, and it runs on
-  a developer's machine, not in Actions.
-- **Review agent in the workflow.** `loop-pr.yml` still has no model connected,
-  so the gate's review is the deterministic checks alone and reports `blocked`
-  for the agent portion. The local runner does run a real review agent, but
-  that review is advisory and does not satisfy the workflow's gate.
-- **An end-to-end run.** The local runner has never taken a real issue through
-  to a merged pull request in this repository. Its components are tested against
-  fakes and real git; the whole path has not been exercised.
+- **A first cloud run.** The wiring is complete and asserted by tests, but no
+  issue has yet gone through the cloud path end to end in this repository. Until
+  `CLAUDE_CODE_OAUTH_TOKEN` is set, every pull request reports `blocked` for the
+  review portion, which is the intended fail-closed default rather than a fault.
+- **Repository settings.** Rulesets, required checks and auto-merge are applied
+  by a person; `loop-bootstrap.yml` prints exactly what to set.
+- **Merge-conflict detection on the base branch.** GitHub raises no webhook when
+  the base branch advances and creates a conflict, so nothing reacts to it until
+  the next event on the pull request.
 - **Repository settings.** Rulesets, required checks and auto-merge must be
   applied by a human. They are printed by `loop-bootstrap.yml`.
 - **Live workflow execution.** The decision logic is covered by 206 tests. The
