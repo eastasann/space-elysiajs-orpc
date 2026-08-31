@@ -8,6 +8,7 @@ describes the same lifecycle when a person drives it. The rules in
 [`AGENTS.md`](../AGENTS.md) apply unchanged; this document adds what happens
 around them.
 
+- [Fully unattended mode](#fully-unattended-mode)
 - [Two planes](#two-planes)
 - [Lifecycle](#lifecycle)
 - [Labels](#labels)
@@ -24,6 +25,205 @@ around them.
 - [Connecting a coding agent](#connecting-a-coding-agent)
 - [The local execution plane](#the-local-execution-plane)
 - [What is not automated](#what-is-not-automated)
+
+---
+
+## Fully unattended mode
+
+Normal development on this repository is autonomous. A person defines the
+backlog; the loop implements it, verifies it, reviews it, merges it, and moves
+to the next issue. Human intervention is exceptional rather than part of the
+happy path.
+
+```bash
+bun run loop:watch --unattended
+```
+
+### The governing idea
+
+Risk decides **how much verification a change must pass**, not **whether a
+person must approve it**.
+
+The old model sent every `risk:high` change to a human. That did not make those
+changes safer — it made them slower, and it meant an issue whose acceptance
+criteria said "document this in `AGENTS.md`" stalled on a documentation edit.
+Risk now buys verification depth, and all three tiers merge on their own.
+
+| | Verification | Independent reviews | Merges automatically |
+| --- | --- | --- | --- |
+| `risk:low` | format · lint · typecheck · test · build | 1 | yes |
+| `risk:medium` | + dependency audit · end-to-end | 1 | yes |
+| `risk:high` | + Docker smoke · load balancing · migration · loop self-test | **2** | yes |
+
+Tiers are cumulative and defined as data in
+[`.github/loop-policy.json`](../.github/loop-policy.json). A step carrying
+`whenChanged` runs only when the diff touches something it could break, so a
+README fix does not start Docker.
+
+### A step that cannot run is not a step that passed
+
+Each verification step ends in one of four states, and the fourth is the one
+that matters:
+
+- **passed** / **failed** — it ran and gave an answer.
+- **not-applicable** — the diff touches nothing it guards.
+- **unavailable** — it could not run at all, because a tool it needs is missing.
+
+`unavailable` blocks the issue. An unattended loop that counted "Docker isn't
+installed" as "the Docker smoke test succeeded" would merge infrastructure
+changes on the strength of a check that never happened. No amount of agent
+effort installs Docker, so the issue is marked `agent:blocked` and the loop moves
+to independent work.
+
+### High-risk dual review
+
+```mermaid
+flowchart LR
+    coder["Coding agent<br/>(fresh session)"] --> pr["Pull request"]
+    pr --> a["Reviewer A<br/>(fresh session)"]
+    pr --> b["Reviewer B<br/>(fresh session)"]
+    a --> agg["Aggregator"]
+    b --> agg
+    agg -->|both approve, no blocking findings| merge["GitHub auto-merge"]
+    agg -->|either requests changes| fix["Fix round"]
+    agg -->|either blocked, or one missing| blocked["agent:blocked"]
+    fix --> coder
+```
+
+Two Claude Code invocations with no shared session and no sight of the coder's
+reasoning. [`aggregateReviews`](../tooling/loop/src/aggregate.ts) resolves them
+strictly:
+
+- fewer usable reviews than the tier requires → **blocked**;
+- any reviewer `blocked` → **blocked**;
+- any reviewer `request_changes`, or any finding at or above the blocking
+  severity from either → **request_changes**;
+- otherwise → **approve**.
+
+A reviewer that could not be run has expressed no opinion, and no opinion is
+never read as no objection. That single rule is what makes the second reviewer
+worth its cost.
+
+### Protecting the control plane
+
+An autonomous system that can rewrite its own merge policy has no merge policy.
+[`control-plane.ts`](../tooling/loop/src/control-plane.ts) enforces three
+things:
+
+1. **Reaching the control plane is always high risk.** Workflows, the policy
+   file, `tooling/loop`, and the agent prompts. A one-line edit to the merge
+   gate is not a small change.
+2. **Risk is monotonic.** A change is classified under the base branch's policy
+   *and* under whatever policy it proposes, and the stricter answer wins.
+   "Change the policy so this counts as low risk" buys nothing.
+3. **Weakening is detected, and needs a person.** Dropping a required check,
+   losing a reviewer, deleting a tier step, raising the blocking severity,
+   removing a risk rule, or introducing `pull_request_target` produces a
+   `critical` finding and the one remaining `human_approval_required`.
+
+`AGENTS.md` is deliberately **not** a high-risk path. Its diff is matched
+against `controlPlane.policySignals`, so correcting a stale command is
+documentation (`medium`) and changing what agents may merge is policy (`high`,
+control plane). The two no longer share a classification.
+
+### Test integrity
+
+For a loop that merges on green, nothing distinguishes "fixed the bug" from
+"stopped looking for it" — so
+[`check:test-integrity`](../tooling/loop/src/checks/test-integrity.ts) looks.
+Deleted test files, added skips, `.only`, assertions that cannot fail,
+file-wide `@ts-nocheck` and lint suppressions all raise blocking findings.
+Removing a test can be right; it belongs in the issue, and saying so there is
+cheap.
+
+### Block-and-continue
+
+A single failed issue is not a global stop.
+
+```
+#10 fails its budget  →  agent:blocked, comment, loop moves on
+#11 depends on #10    →  temporarily ineligible (label untouched)
+#12 independent       →  claimed and worked
+```
+
+`#11` keeps `agent:ready`. It is *ineligible*, not blocked, and becomes
+available again on its own the moment `#10` closes — GitHub remains the source
+of truth and nothing has to remember.
+
+### Retry limits
+
+| Category | Default | Exhausting it |
+| --- | --- | --- |
+| Coding rounds per issue | 3 | issue blocked, loop continues |
+| Review rounds per issue | 3 | issue blocked, loop continues |
+| CI rounds per issue | 3 | issue blocked, loop continues |
+| Reviewer retries | 2 | that review counts as absent → blocked |
+| Conflict resolution | 2 | issue blocked, loop continues |
+
+A resumed run starts at `fixRounds + 1`, so restarting the runner cannot hand
+the agent a fresh budget.
+
+### Operational budgets
+
+Unattended is not unlimited. Retry limits bound one issue; these bound the loop.
+
+| Variable | Default |
+| --- | --- |
+| `LOOP_MAX_MODEL_INVOCATIONS_PER_HOUR` | 60 |
+| `LOOP_MAX_ISSUES_PER_DAY` | 20 |
+| `LOOP_MAX_RUNTIME_HOURS` | 12 |
+| `LOOP_MAX_CONSECUTIVE_FAILURES` | 8 |
+
+Counting is by event, not by token or dollar. Claude Code reports a cost per
+invocation, but building a spend limit on a number whose contract is not
+guaranteed would fail in the direction of not stopping.
+
+### Recovery
+
+Transient GitHub and Claude failures are waited out with exponential backoff
+(30s, doubling, capped at 15 minutes), and a run of consecutive failures ends
+the session rather than spinning. A failing test is never treated as transient —
+it is the answer.
+
+Authentication loss stops new claims, preserves state, and retries slowly.
+Nothing is lost, because the state that matters lives on GitHub.
+
+### Global stop conditions
+
+The session ends only when:
+
+1. no eligible independent issue remains;
+2. every remaining issue depends on blocked work;
+3. GitHub stays unreachable past the retry policy;
+4. Claude stays unavailable past the retry policy;
+5. an operational budget is spent;
+6. the per-run issue ceiling is reached;
+7. someone stops the process.
+
+A single failed issue is not one of them. Neither is a `risk:high` issue, nor a
+pull request awaiting review — the system performs that review itself.
+
+### Commands
+
+```bash
+bun run loop:status                     # mode, phase, backlog, blockers
+bun run loop:once --dry-run             # the plan; changes nothing
+bun run loop:watch --unattended --dry-run
+bun run loop:once                       # one issue, then stop
+bun run loop:watch --unattended         # until there is nothing left
+bun run loop:watch --unattended --max-issues 2   # controlled validation
+```
+
+Ctrl-C stops after the current step, releases the lock, and prints the run
+summary. `bun run loop:status` after a restart explains where everything stands;
+`bun run loop:once` resumes rather than duplicating.
+
+### What humans still control
+
+Product direction, backlog priorities, `agent:ready`, credentials, external
+production access, and the `needs:human` label — which takes any pull request
+out of the loop's hands. Plus the two cases the loop refuses to decide: a fork,
+and a change that weakens the loop's own protections.
 
 ---
 

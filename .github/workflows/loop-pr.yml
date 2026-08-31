@@ -18,6 +18,14 @@ name: Loop - pull request gate
 #
 # A pull request from a fork is evaluated but never merged automatically; the
 # gate reports `human_approval_required` for it.
+#
+# AUTONOMOUS RISK TIERS
+#
+# Risk decides how much verification a change must pass, not whether a person is
+# summoned. High-risk pull requests merge automatically once they satisfy the
+# high tier — which includes TWO independent review passes with no shared
+# session. `human_approval_required` survives only for a fork, a change that
+# weakens the loop's own protections, and the `needs:human` label.
 
 on:
   workflow_run:
@@ -235,6 +243,37 @@ jobs:
               }, null, 2),
             )
 
+      # The policy as this pull request proposes it, when it changes one. Risk is
+      # classified under BOTH this and the trusted default-branch policy, and
+      # the stricter answer wins — so a pull request cannot lower its own risk
+      # by rewriting the rules it is judged against.
+      - name: Extract the proposed policy
+        id: proposed_policy
+        if: steps.resolve.outputs.found == 'true'
+        env:
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          # Read-only: fetches one blob and executes nothing from the pull request.
+          git fetch --no-tags --depth=1 origin "${HEAD_SHA}" 2>/dev/null || true
+          if git show "${HEAD_SHA}:.github/loop-policy.json" > .loop/proposed-policy.json 2>/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            rm -f .loop/proposed-policy.json
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The tier has to be known before the reviewers run, because it decides
+      # how many of them there are. Pure, and recomputed by the gate itself.
+      - name: Classify risk
+        id: classify
+        if: steps.resolve.outputs.found == 'true'
+        env:
+          LOOP_CONTEXT: .loop/context.json
+          LOOP_DIFF: .loop/pr.diff
+          LOOP_POLICY: .github/loop-policy.json
+          LOOP_PROPOSED_POLICY: ${{ steps.proposed_policy.outputs.found == 'true' && '.loop/proposed-policy.json' || '' }}
+        run: bun tooling/loop/bin/classify-risk.ts
+
       - name: Build the review prompt
         if: steps.resolve.outputs.found == 'true'
         env:
@@ -261,11 +300,28 @@ jobs:
           prompt_file: .loop/prompt.md
           output_file: .loop/review.txt
 
+      # Second, independent pass. Runs only for the high tier, and only when a
+      # provider is configured. A separate action invocation is a separate
+      # session: a reviewer that shared the first one's context would be
+      # confirming its own conclusions rather than checking them.
+      - name: Run the second review agent
+        id: review_agent_b
+        if: >-
+          steps.resolve.outputs.found == 'true' &&
+          vars.LOOP_REVIEW_PROVIDER == 'claude-code-action' &&
+          steps.classify.outputs.risk == 'high'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt_file: .loop/prompt.md
+          output_file: .loop/review-b.txt
+
       - name: Record that no review agent ran
         if: steps.resolve.outputs.found == 'true' && vars.LOOP_REVIEW_PROVIDER != 'claude-code-action'
         run: |
           echo "No review agent provider configured (vars.LOOP_REVIEW_PROVIDER is unset)." >&2
-          echo "The gate will report 'blocked' and require a human." >&2
+          echo "The gate will report 'blocked'. A missing review is never an approval." >&2
 
       - name: Evaluate the gate
         id: evaluate
@@ -273,7 +329,14 @@ jobs:
         env:
           LOOP_CONTEXT: .loop/context.json
           LOOP_DIFF: .loop/pr.diff
-          LOOP_REVIEW_OUTPUT: ${{ vars.LOOP_REVIEW_PROVIDER != '' && '.loop/review.txt' || '' }}
+          # Colon-separated, one path per independent pass. The high tier needs
+          # two; a path that is listed but absent counts as a reviewer that did
+          # not run, which reduces the count the aggregate sees.
+          LOOP_REVIEW_OUTPUT: >-
+            ${{ vars.LOOP_REVIEW_PROVIDER == '' && ''
+            || (steps.classify.outputs.risk == 'high' && '.loop/review.txt:.loop/review-b.txt'
+            || '.loop/review.txt') }}
+          LOOP_PROPOSED_POLICY: ${{ steps.proposed_policy.outputs.found == 'true' && '.loop/proposed-policy.json' || '' }}
           LOOP_POLICY: .github/loop-policy.json
         run: bun tooling/loop/bin/evaluate-pr.ts
 
