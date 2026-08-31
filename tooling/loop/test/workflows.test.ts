@@ -347,3 +347,49 @@ describe('the cloud agent integration', () => {
     }
   })
 })
+
+describe('the issue lifecycle survives a missing runner', () => {
+  const dispatch = workflows.find((w) => w.file === 'loop-agent-dispatch.yml')
+  const steps = dispatch?.doc.jobs?.dispatch?.steps ?? []
+  const indexOf = (name: string) => steps.findIndex((step) => step.name === name)
+
+  const unavailable = indexOf('Report that no agent runner is configured')
+  const claim = indexOf('Claim the issue')
+
+  it('has both of the steps this depends on', () => {
+    expect(unavailable, 'the unavailable-runner step').toBeGreaterThanOrEqual(0)
+    expect(claim, 'the claim step').toBeGreaterThanOrEqual(0)
+  })
+
+  // The first real dispatch claimed issue #4, then discovered the secret was
+  // missing and blocked it. The issue ended up carrying `agent:in-progress` and
+  // `agent:blocked` at once: excluded from selection, assigned to nobody, and
+  // still that way after the secret would have been set.
+  it('decides whether it can run before claiming anything', () => {
+    expect(unavailable).toBeLessThan(claim)
+  })
+
+  it('does not block an issue for a repository-wide precondition', () => {
+    const script = String(steps[unavailable]?.with?.script ?? '')
+    // Assert on the call, not the string: the step explains in a comment and in
+    // its notice why it does not block, so both mention the label.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    expect(code).not.toContain('addLabels')
+    expect(code).toContain('createComment')
+  })
+
+  // The general failure path is the one that legitimately blocks, and it has to
+  // clear the claim it made or the issue is stranded as neither available nor
+  // in progress.
+  it('clears the claim on the path that does block', () => {
+    const script = String(steps[indexOf('Report that the coding agent failed')]?.with?.script ?? '')
+
+    expect(script).toContain('agent:blocked')
+    expect(script).toContain('agent:in-progress')
+    expect(script).toContain('removeLabel')
+  })
+})

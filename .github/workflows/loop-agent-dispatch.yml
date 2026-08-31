@@ -82,6 +82,73 @@ jobs:
             if (mode === 'implement' && !process.env.ISSUE) core.setFailed('mode=implement needs an issue')
             if (mode === 'fix' && !process.env.PULL_REQUEST) core.setFailed('mode=fix needs a pull_request')
 
+      - name: Report that no agent runner is configured
+        if: env.CODING_AGENT_AVAILABLE != 'true'
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ inputs.mode }}
+          ISSUE: ${{ inputs.issue }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+          ATTEMPT: ${{ inputs.attempt }}
+        with:
+          script: |
+            const target = process.env.ISSUE || process.env.PULL_REQUEST
+            const lines = [
+              '### Coding agent not dispatched',
+              '',
+              'The loop reached the point of invoking the coding agent, but this',
+              'repository has no `CLAUDE_CODE_OAUTH_TOKEN` secret.',
+              '',
+              `- Mode: \`${process.env.MODE}\``,
+              `- Target: ${target ? `#${target}` : '(none)'}`,
+              `- Review attempt: ${process.env.ATTEMPT || 'n/a'}`,
+              '',
+              '**To connect one**, run `claude setup-token` and add the result as the',
+              'repository secret `CLAUDE_CODE_OAUTH_TOKEN`. That token authenticates',
+              'with a Claude subscription, so no Anthropic API key is needed. See',
+              '`docs/loop-engineering.md#fully-unattended-mode`.',
+              '',
+              'This issue keeps `agent:ready` and is not marked blocked: the',
+              'secret is missing repository-wide, which says nothing about this',
+              'issue in particular. Once it is set, the loop picks the issue up',
+              'with no relabelling.',
+              '',
+              'Until then, implement the issue by hand. Everything else in the loop —',
+              'risk classification, review, gates, merge policy, next-issue selection —',
+              'runs normally on the resulting pull request.',
+            ].join('\n')
+
+            core.summary.addRaw(lines).write()
+
+            // Deliberately no `agent:blocked` label, and this step runs before
+            // the issue is claimed. A missing secret is a property of the
+            // repository, not of this issue: every issue would hit it
+            // identically. Blocking one would sideline it for a reason that has
+            // nothing to do with it, and it would stay sidelined after the
+            // secret arrived while unrelated work carried on without it —
+            // exactly backwards from what block-and-continue is for. The issue
+            // keeps `agent:ready`, so configuring the secret is the only thing
+            // needed to pick it up.
+            if (target) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: Number(target),
+                body: lines,
+              })
+            }
+
+            // Fail on purpose. "Required credentials are unavailable" is an
+            // explicit stop condition, and a stop condition must be visible.
+            core.setFailed('No coding agent runner is configured; the loop stops here.')
+
+      # --- The coding agent -------------------------------------------------
+      # A Claude Code cloud execution, authenticated with the subscription token.
+      # The action pushes and opens the pull request as the Claude GitHub App
+      # rather than with GITHUB_TOKEN, which is what lets CI and the gate fire on
+      # its commits — GitHub does not raise workflow events for GITHUB_TOKEN
+      # pushes, and a pull request nothing runs on would stall the loop silently.
+
       - name: Check out the default branch
         uses: actions/checkout@v4
         with:
@@ -155,66 +222,6 @@ jobs:
             core.setOutput('claimed', 'true')
             core.setOutput('title', after.title)
 
-      - name: Report that no agent runner is configured
-        if: env.CODING_AGENT_AVAILABLE != 'true'
-        uses: actions/github-script@v7
-        env:
-          MODE: ${{ inputs.mode }}
-          ISSUE: ${{ inputs.issue }}
-          PULL_REQUEST: ${{ inputs.pull_request }}
-          ATTEMPT: ${{ inputs.attempt }}
-        with:
-          script: |
-            const target = process.env.ISSUE || process.env.PULL_REQUEST
-            const lines = [
-              '### Coding agent not dispatched',
-              '',
-              'The loop reached the point of invoking the coding agent, but this',
-              'repository has no `CLAUDE_CODE_OAUTH_TOKEN` secret.',
-              '',
-              `- Mode: \`${process.env.MODE}\``,
-              `- Target: ${target ? `#${target}` : '(none)'}`,
-              `- Review attempt: ${process.env.ATTEMPT || 'n/a'}`,
-              '',
-              '**To connect one**, run `claude setup-token` and add the result as the',
-              'repository secret `CLAUDE_CODE_OAUTH_TOKEN`. That token authenticates',
-              'with a Claude subscription, so no Anthropic API key is needed. See',
-              '`docs/loop-engineering.md#fully-unattended-mode`.',
-              '',
-              'Until then, implement the issue by hand. Everything else in the loop —',
-              'risk classification, review, gates, merge policy, next-issue selection —',
-              'runs normally on the resulting pull request.',
-            ].join('\n')
-
-            core.summary.addRaw(lines).write()
-
-            if (target) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: Number(target),
-                body: lines,
-              })
-              if (process.env.MODE === 'implement') {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: Number(target),
-                  labels: ['agent:blocked'],
-                })
-              }
-            }
-
-            // Fail on purpose. "Required credentials are unavailable" is an
-            // explicit stop condition, and a stop condition must be visible.
-            core.setFailed('No coding agent runner is configured; the loop stops here.')
-
-      # --- The coding agent -------------------------------------------------
-      # A Claude Code cloud execution, authenticated with the subscription token.
-      # The action pushes and opens the pull request as the Claude GitHub App
-      # rather than with GITHUB_TOKEN, which is what lets CI and the gate fire on
-      # its commits — GitHub does not raise workflow events for GITHUB_TOKEN
-      # pushes, and a pull request nothing runs on would stall the loop silently.
       - name: Run the coding agent
         id: coding_agent
         if: env.CODING_AGENT_AVAILABLE == 'true'
