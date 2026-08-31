@@ -206,6 +206,14 @@ bun run test:e2e    # Playwright, through the proxy
 `apps/api` and `apps/worker` have no build step — Bun runs TypeScript directly,
 so `bun run typecheck` is their compile-time gate.
 
+Component tests for `apps/web`, `apps/admin` and `packages/ui` live in each
+package's `test/` directory, next to the unit tests already there. `bun test`
+has no DOM, so each package's `test` script preloads `happy-dom` — the
+smallest registrator that works with React 19 and Testing Library — via
+`bun test --preload ./test/happydom.ts`. A component that reaches
+`@newsdeck/api-client` (like `LoadBalancingProbe`) takes it as a prop instead
+of importing it, so tests supply a fake rather than mocking the module.
+
 Changing anything under `tooling/loop/`, `.github/workflows/` or
 `.github/loop-policy.json` changes the merge policy. `bun run test` covers it,
 including a security lint that fails the build on an unsafe workflow — read
