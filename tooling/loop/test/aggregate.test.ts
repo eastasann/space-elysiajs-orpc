@@ -127,12 +127,18 @@ describe('test integrity', () => {
     expect(findings[0]?.description).toContain('deleted')
   })
 
+  // These fixtures are assembled rather than written literally. A fixture
+  // containing the marker it tests for is itself flagged by the very check it
+  // covers, so every pull request touching this file would report a skipped or
+  // focused test that does not exist.
+  const marker = (modifier: string) => `  test${'.'}${modifier}('creates a source', () => {})`
+
   it('flags newly skipped tests', () => {
     const findings = checkTestIntegrity(
       diffOf([
         {
           path: 'apps/api/test/sources.test.ts',
-          added: ["  test.skip('creates a source', () => {})"],
+          added: [marker('skip')],
           removed: ["  test('creates a source', () => {})"],
         },
       ]),
@@ -141,12 +147,12 @@ describe('test integrity', () => {
     expect(findings.some((f) => f.description.includes('skipped'))).toBe(true)
   })
 
-  it('flags a .only marker', () => {
+  it('flags a focus marker', () => {
     const findings = checkTestIntegrity(
-      diffOf([{ path: 'apps/api/test/x.test.ts', added: ["describe.only('x', () => {})"] }]),
+      diffOf([{ path: 'apps/api/test/x.test.ts', added: [marker('only')] }]),
     )
 
-    expect(findings.some((f) => f.description.includes('.only'))).toBe(true)
+    expect(findings.some((f) => f.description.includes('other test'))).toBe(true)
   })
 
   it('flags an assertion that cannot fail', () => {

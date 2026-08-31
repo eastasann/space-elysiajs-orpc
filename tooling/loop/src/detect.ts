@@ -122,6 +122,17 @@ function leadingMajor(range: string): string | null {
  * Read from the raw diff lines rather than by parsing both versions of the
  * file, because only one side of a change is available in a patch.
  */
+/**
+ * Values that are a dependency specifier rather than, say, a shell command.
+ *
+ * `DEPENDENCY_LINE` matches any `"key": "value"` pair, which in a package.json
+ * diff also catches `scripts`. That reported `"docker:smoke": "docker compose
+ * up …"` as a new dependency on a real pull request. A specifier is a semver
+ * range or one of npm's protocols; a script is neither.
+ */
+const DEPENDENCY_VALUE =
+  /^(?:workspace:|npm:|file:|link:|portal:|patch:|git\+|github:|https?:|[a-z-]+\/[a-z-]+#)|^[\^~>=<v ]*\d+(?:\.\d+)*(?:[-+.][\w.-]+)?$|^\*$|^latest$/i
+
 export function dependencyChanges(file: DiffFile): DependencyChange[] {
   if (!file.path.endsWith('package.json')) return []
 
@@ -130,11 +141,15 @@ export function dependencyChanges(file: DiffFile): DependencyChange[] {
 
   for (const line of file.removedLines) {
     const match = DEPENDENCY_LINE.exec(line)
-    if (match?.[1] !== undefined && match[2] !== undefined) before.set(match[1], match[2])
+    if (match?.[1] !== undefined && match[2] !== undefined && DEPENDENCY_VALUE.test(match[2])) {
+      before.set(match[1], match[2])
+    }
   }
   for (const line of file.addedLines) {
     const match = DEPENDENCY_LINE.exec(line)
-    if (match?.[1] !== undefined && match[2] !== undefined) after.set(match[1], match[2])
+    if (match?.[1] !== undefined && match[2] !== undefined && DEPENDENCY_VALUE.test(match[2])) {
+      after.set(match[1], match[2])
+    }
   }
 
   const changes: DependencyChange[] = []
