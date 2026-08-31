@@ -609,12 +609,14 @@ describe('the loop keeps going after it merges something', () => {
     const branch = code.slice(at, code.indexOf('\n}', at))
     expect(branch, 'it returns').toContain('return')
 
-    // The branch may announce, but only after re-reading and finding the pull
-    // request merged. Once it has decided the merge is genuinely still pending
-    // and hands over to auto-merge, nothing after that may announce: the merge
-    // has not happened, and this run will never see it.
-    const deferred = branch.slice(branch.indexOf('enablePullRequestAutoMerge'))
-    expect(deferred, 'the deferred tail announces nothing').not.toContain('announce()')
+    // The branch announces only on a confirmed merge. It has three endings —
+    // the pull request turned out already merged, auto-merge completed it while
+    // this job waited, or it is still pending — and the first two announce.
+    // What must never happen is an announcement with no merge behind it, so
+    // every `announce()` here has to sit after a `.merged` check.
+    for (const [before] of branch.matchAll(/([\s\S]*?)announce\(\)/g)) {
+      expect(before, 'every announcement follows a merged check').toContain('.merged')
+    }
   })
 
   // Both reviewers on #42 caught this: the dispatch sat only after the direct

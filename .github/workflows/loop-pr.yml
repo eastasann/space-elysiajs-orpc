@@ -675,7 +675,18 @@ jobs:
               }
 
               // Genuinely still pending. Hand it to GitHub, which holds the
-              // pull request until the ruleset is satisfied.
+              // pull request until the ruleset is satisfied — then wait for it,
+              // rather than assuming something will come back for it.
+              //
+              // An earlier comment here claimed a real check completing would
+              // fire CI and this gate again. A reviewer showed that is not so:
+              // `decideMerge` only returns `auto_merge` once every tracked
+              // check is already green, so nothing this loop tracks is pending
+              // by the time this runs. What is left is a stale
+              // `mergeable_state` or a required check the loop does not track,
+              // and neither guarantees another event — GitHub completes the
+              // merge server-side, raising none, and there is no scheduled
+              // sweep. Waiting here is what keeps that merge announceable.
               //
               // The merge that follows is not announced by this run, and cannot
               // be. It does not strand the pull request: whatever is still
@@ -691,11 +702,32 @@ jobs:
                    }`,
                   { id: pr.node_id },
                 )
-                core.info('Auto-merge enabled (squash); a later gate run will announce it.')
+                core.info('Auto-merge enabled (squash); waiting for GitHub to take it.')
               } catch (error) {
                 core.warning(`GitHub declined both the merge and auto-merge: ${error.message}`)
                 core.notice('The ruleset governs this merge; nothing was forced.')
+                return
               }
+
+              // Bounded: a minute is long enough for a stale mergeable_state to
+              // settle and short enough not to hold a runner open. If it lands,
+              // this run announces it; if not, the log says plainly that the
+              // announcement is owed, so a silent stall reads as one.
+              for (let waited = 0; waited < 60_000; waited += 10_000) {
+                await new Promise((resolve) => setTimeout(resolve, 10_000))
+                const { data: after } = await github.rest.pulls.get({ owner, repo, pull_number })
+                if (after.merged) {
+                  core.info('Auto-merge completed it; announcing.')
+                  await announce()
+                  return
+                }
+              }
+
+              core.warning(
+                `Auto-merge is enabled on #${pull_number} but it has not merged yet. ` +
+                  'Whenever it does, no event follows, so loop-next-issue must be ' +
+                  'run to close the issue and start the next one.',
+              )
               return
             }
 
