@@ -35,6 +35,7 @@ export {
   REVIEW_JSON_SCHEMA,
 } from './claude-agent.ts'
 export {
+  INSTALL_STEP,
   loadConfig,
   type RunnerConfig,
   runnerConfigSchema,
@@ -57,6 +58,7 @@ export {
   repositoryRoot,
 } from './git.ts'
 export {
+  type Capabilities,
   type ChecksVerdict,
   createGhClient,
   type GhAvailability,
@@ -64,6 +66,8 @@ export {
   GhError,
   type GhIssue,
   type GhPullRequest,
+  type GitHubAdapter,
+  type Mergeability,
   probeGh,
   summariseChecks,
 } from './github.ts'

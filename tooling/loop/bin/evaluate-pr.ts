@@ -4,7 +4,10 @@
  * Reads:
  *   LOOP_CONTEXT       path to the evaluation context JSON
  *   LOOP_DIFF          path to the unified diff of the pull request
- *   LOOP_REVIEW_OUTPUT path to the review agent's raw output (optional)
+ *   LOOP_REVIEW_OUTPUT colon-separated paths to each review agent's raw output
+ *                      (optional; one per independent pass the tier requires)
+ *   LOOP_PROPOSED_POLICY path to the policy file as the pull request proposes it,
+ *                      when it changes one (optional)
  *   LOOP_POLICY        path to the policy file (defaults to .github/loop-policy.json)
  *   LOOP_OUTPUT_DIR    directory to write result.json and summary.md into
  *
@@ -16,11 +19,12 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runDeterministicChecks } from '../src/checks/index.ts'
+import { findUnsafeWorkflowChanges, findWeakenedProtections } from '../src/control-plane.ts'
 import { parseUnifiedDiff } from '../src/diff.ts'
-import { decideMerge } from '../src/merge-gate.ts'
-import { parsePolicy } from '../src/policy.ts'
+import { decideMerge, HUMAN_HOLD_LABEL } from '../src/merge-gate.ts'
+import { parsePolicy, reviewersForRisk } from '../src/policy.ts'
 import { mergeReview, parseReviewText, type ReviewResult } from '../src/review.ts'
-import { classifyRisk } from '../src/risk.ts'
+import { classifyRiskMonotonic } from '../src/risk.ts'
 import { parseLoopState, recordRound, serialiseLoopState } from '../src/state.ts'
 import { renderPullRequestSummary } from '../src/summary.ts'
 import { closingIssue, EvaluationContextSchema } from './context.ts'
@@ -69,29 +73,71 @@ const policy = parsePolicy(readJson(policyPath))
 const context = EvaluationContextSchema.parse(readJson(required('LOOP_CONTEXT')))
 const diff = parseUnifiedDiff(readFileSync(required('LOOP_DIFF'), 'utf8'))
 
-const reviewOutputPath = process.env.LOOP_REVIEW_OUTPUT
-const agentReview: ReviewResult =
-  reviewOutputPath === undefined || reviewOutputPath.trim() === ''
-    ? unavailableReview('no review agent is configured')
-    : !existsSync(reviewOutputPath)
-      ? unavailableReview('the review agent wrote no output')
-      : parseReviewText(readFileSync(reviewOutputPath, 'utf8')).result
+/**
+ * Review output paths, one per independent pass.
+ *
+ * `LOOP_REVIEW_OUTPUT` holds a colon-separated list so a high-risk tier can
+ * supply two. A path that is configured but absent produces an unavailable
+ * review rather than being dropped: a reviewer that failed to run must reduce
+ * the count the aggregate sees, or "we could not review it" would silently
+ * become "it needs no review".
+ */
+const reviewOutputPaths = (process.env.LOOP_REVIEW_OUTPUT ?? '')
+  .split(':')
+  .map((path) => path.trim())
+  .filter((path) => path !== '')
 
 const deterministic = runDeterministicChecks(diff)
-const review = mergeReview(agentReview, deterministic, policy.review.blockingSeverity)
 
-const risk = classifyRisk({
+const agentReviews: ReviewResult[] =
+  reviewOutputPaths.length === 0
+    ? [unavailableReview('no review agent is configured')]
+    : reviewOutputPaths.map((path) =>
+        existsSync(path)
+          ? parseReviewText(readFileSync(path, 'utf8')).result
+          : unavailableReview('the review agent wrote no output'),
+      )
+
+// Deterministic findings ride on the first review so they can only ever make
+// the aggregate stricter, never supply a missing opinion.
+const reviews = agentReviews.map((review, index) =>
+  index === 0 ? mergeReview(review, deterministic, policy.review.blockingSeverity) : review,
+)
+
+const labels = [...context.pullRequest.labels, ...context.issueLabels]
+
+// The head policy is read from the checkout the workflow is running against,
+// which is the default branch — so `policy` is already the trusted one. When a
+// pull request proposes a different policy the workflow passes it separately;
+// the stricter of the two governs.
+const proposedPolicyPath = process.env.LOOP_PROPOSED_POLICY
+const proposedPolicy =
+  proposedPolicyPath !== undefined && proposedPolicyPath !== '' && existsSync(proposedPolicyPath)
+    ? parsePolicy(readJson(proposedPolicyPath))
+    : undefined
+
+const risk = classifyRiskMonotonic({
   diff,
-  labels: [...context.pullRequest.labels, ...context.issueLabels],
-  policy,
+  labels,
+  basePolicy: policy,
+  headPolicy: proposedPolicy,
 })
+
+const weakenedProtections =
+  proposedPolicy === undefined
+    ? findUnsafeWorkflowChanges(diff)
+    : [
+        ...findWeakenedProtections({ base: policy, head: proposedPolicy, diff }),
+        ...findUnsafeWorkflowChanges(diff),
+      ]
 
 const issue = closingIssue(context.pullRequest.body)
 const previous = parseLoopState(context.stickyComment, issue)
 
 const outcome = decideMerge({
   risk: risk.risk,
-  review,
+  reviews,
+  requiredReviewers: reviewersForRisk(policy, risk.risk),
   checks: context.checks,
   requiredChecks: context.requiredChecks,
   reviewAttempts: previous.reviewAttempts,
@@ -100,7 +146,11 @@ const outcome = decideMerge({
   isFork: context.pullRequest.isFork,
   isDraft: context.pullRequest.isDraft,
   blockingSeverity: policy.review.blockingSeverity,
+  weakenedProtections,
+  humanHold: labels.includes(HUMAN_HOLD_LABEL),
 })
+
+const review = outcome.review
 
 const state = recordRound({
   state: { ...previous, issue },

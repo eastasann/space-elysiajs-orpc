@@ -24,12 +24,14 @@ export interface Preflight {
 export interface PreflightOptions {
   repository: string
   lockPath: string
+  /** `owner/name`. When given, repository access is verified, not assumed. */
+  repo?: string
 }
 
 export async function preflight(options: PreflightOptions): Promise<Preflight> {
   const [claude, gh, worktreeClean, lock] = await Promise.all([
     probeClaude(),
-    probeGh({ cwd: options.repository }),
+    probeGh({ cwd: options.repository, repo: options.repo }),
     isClean(options.repository),
     readLock(options.lockPath),
   ])
@@ -40,7 +42,11 @@ export async function preflight(options: PreflightOptions): Promise<Preflight> {
   if (!claude.available) problems.push(`Claude Code: ${claude.reason}. ${claude.remedy}`)
   else if (claude.warning !== undefined) warnings.push(claude.warning)
 
-  if (!gh.available) problems.push(`GitHub CLI: ${gh.reason}. ${gh.remedy}`)
+  if (!gh.available) {
+    problems.push(
+      `GitHub CLI: ${gh.reason}. ${gh.remedy}${gh.detail === undefined || gh.detail === '' ? '' : ` (${gh.detail})`}`,
+    )
+  }
 
   if (!worktreeClean) {
     // The runner works in its own worktree, so this is not fatal — but a dirty
@@ -72,7 +78,7 @@ export function formatPreflight(result: Preflight): string {
   )
   lines.push(
     result.gh.available
-      ? `GitHub CLI    ok (${result.gh.account})`
+      ? `GitHub CLI    ok (${result.gh.account}, ${result.gh.repository})`
       : `GitHub CLI    NOT READY (${result.gh.reason})`,
   )
   lines.push(`Main checkout ${result.worktreeClean ? 'clean' : 'has uncommitted changes'}`)

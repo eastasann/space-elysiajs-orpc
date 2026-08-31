@@ -3,6 +3,7 @@ import { branchName, isAgentBranch, slugify } from '../src/branch.ts'
 import { interpretInvocation } from '../src/claude.ts'
 import { filteredEnvironment, run } from '../src/exec.ts'
 import { pushBranch } from '../src/git.ts'
+import { probeGh } from '../src/github.ts'
 import { cap, fence, loadTemplate, render } from '../src/prompts.ts'
 import { redact, redactJson } from '../src/redact.ts'
 import { publishable, renderRunnerComment } from '../src/report.ts'
@@ -138,11 +139,21 @@ describe('the merge boundary', () => {
     expect(isAgentBranch('agent/main')).toBe(false)
   })
 
-  test('the runner ships no merge, force-push or ruleset call', async () => {
-    // A structural check on the package's own source: the safest merge path is
-    // one that does not exist.
+  test('the runner can request a merge but never perform one', async () => {
+    // A structural check on the package's own source. The runner is allowed to
+    // ask GitHub to auto-merge — that is the whole unattended design — but it
+    // must have no path that merges directly, forces a push, bypasses a
+    // protection, or edits a ruleset. The safest such path is one that does not
+    // exist, and this is what keeps it from being reintroduced.
     const files = new Bun.Glob('**/*.ts').scan({ cwd: `${import.meta.dir}/..`, absolute: true })
-    const forbidden = [/--force\b/, /['"]merge['"]/, /forceWithLease/, /rulesets/]
+    const forbidden = [
+      { pattern: /--force\b/, what: 'a force push' },
+      { pattern: /--admin\b/, what: 'an admin merge that bypasses protections' },
+      { pattern: /forceWithLease/, what: 'a force push' },
+      { pattern: /rulesets?\b/, what: 'a ruleset edit' },
+      { pattern: /branch(?:es)?\/protection/, what: 'a branch-protection edit' },
+      { pattern: /['"]PUT['"]/, what: 'a direct REST merge' },
+    ]
 
     for await (const file of files) {
       if (file.includes('/test/')) continue
@@ -154,14 +165,28 @@ describe('the merge boundary', () => {
           const trimmed = line.trim()
           return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'))
         })
-        // `git worktree remove --force` is the one legitimate use, and it is
-        // scoped to a directory this runner created.
+        // `git worktree remove --force` is the one legitimate `--force`, and it
+        // is scoped to a directory this runner created.
         .filter((line) => !line.includes("'worktree'"))
 
-      for (const pattern of forbidden) {
-        expect(code.filter((line) => pattern.test(line))).toEqual([])
+      for (const { pattern, what } of forbidden) {
+        const offending = code.filter((line) => pattern.test(line))
+        expect(offending, `${file} contains ${what}`).toEqual([])
       }
     }
+  })
+
+  test('the only merge call asks GitHub to decide', async () => {
+    const source = await Bun.file(`${import.meta.dir}/../src/github.ts`).text()
+    const mergeCalls = source
+      .split('\n')
+      .filter((line) => /'merge'/.test(line) && !line.trim().startsWith('//'))
+
+    expect(mergeCalls).toHaveLength(1)
+    // `--auto` is what makes it GitHub's decision rather than the runner's:
+    // GitHub merges when its own required checks pass, or never.
+    expect(mergeCalls[0]).toContain("'--auto'")
+    expect(mergeCalls[0]).toContain("'--squash'")
   })
 })
 
@@ -222,6 +247,112 @@ describe('published comments', () => {
     expect(comment).not.toContain('ghp_')
     expect(comment).toContain('[redacted:github-token]')
     expect(comment).toContain('It does not merge')
+  })
+})
+
+describe('github readiness', () => {
+  const gh = (
+    responses: Record<string, { code: number; stdout: string; stderr?: string }>,
+  ): Parameters<typeof probeGh>[0] => ({
+    which: () => '/usr/bin/gh',
+    runner: async (_command, args) => {
+      const key = args.join(' ')
+      const match = responses[key] ?? { code: 0, stdout: '' }
+      return {
+        code: match.code,
+        stdout: match.stdout,
+        stderr: match.stderr ?? '',
+        timedOut: false,
+        display: '',
+      }
+    },
+  })
+
+  const DESCRIBE = 'api repos/owner/name --jq {full_name: .full_name, permissions: .permissions}'
+
+  const described = (permissions: Record<string, boolean>) => ({
+    code: 0,
+    stdout: JSON.stringify({ full_name: 'owner/name', permissions }),
+  })
+
+  test('being logged in is not treated as having repository access', async () => {
+    // The exact shape seen in a sandbox whose proxy served `gh api user` but
+    // refused every repository call: authenticated, and useless.
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        [DESCRIBE]: {
+          code: 1,
+          stdout: '',
+          stderr: 'HTTP 403: GitHub access is not enabled for this session',
+        },
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) {
+      expect(result.reason).toBe('no-repository-access')
+      expect(result.remedy).toContain('cannot read owner/name')
+      expect(result.detail).toContain('403')
+    }
+  })
+
+  test('reports ready only when the repository actually reads back', async () => {
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        [DESCRIBE]: described({ pull: true, push: true, triage: true, admin: false }),
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(true)
+    if (result.available) {
+      expect(result.account).toBe('someone')
+      expect(result.repository).toBe('owner/name')
+      expect(result.capabilities.push).toBe(true)
+    }
+  })
+
+  test('read-only access is refused before an issue is ever claimed', async () => {
+    // Claiming an issue this credential cannot label, or building a branch it
+    // cannot push, wastes an agent invocation and leaves the backlog dirty.
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 0, stdout: '' },
+        'api user --jq .login': { code: 0, stdout: 'someone\n' },
+        [DESCRIBE]: described({ pull: true, push: false, triage: false, admin: false }),
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) {
+      expect(result.reason).toBe('insufficient-permissions')
+      expect(result.remedy).toContain('push')
+      expect(result.remedy).toContain('triage')
+    }
+  })
+
+  test('a rejected credential is not-authenticated, not no-access', async () => {
+    const result = await probeGh({
+      ...gh({
+        'auth status': { code: 1, stdout: '' },
+      }),
+      repo: 'owner/name',
+    })
+
+    expect(result.available).toBe(false)
+    if (!result.available) expect(result.reason).toBe('not-authenticated')
+  })
+
+  test('a missing binary is reported before anything is run', async () => {
+    const result = await probeGh({ which: () => null, repo: 'owner/name' })
+    expect(result.available).toBe(false)
+    if (!result.available) expect(result.reason).toBe('not-installed')
   })
 })
 

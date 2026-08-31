@@ -8,7 +8,21 @@
  * `test/scenarios.test.ts` can assert the whole gate without a network.
  */
 
+export {
+  type AggregateInput,
+  type AggregateOutcome,
+  aggregateReviews,
+} from './aggregate.ts'
 export { runDeterministicChecks } from './checks/index.ts'
+export { checkTestIntegrity } from './checks/test-integrity.ts'
+export {
+  assessControlPlane,
+  type ControlPlaneAssessment,
+  findUnsafeWorkflowChanges,
+  findWeakenedProtections,
+  type ProtectionInput,
+  stricterRisk,
+} from './control-plane.ts'
 export {
   type DependencyDeclaration,
   parseDependencyDeclaration,
@@ -32,9 +46,11 @@ export {
 } from './diff.ts'
 export {
   type Candidate,
+  DEFAULT_PRIORITY_LABELS,
   DEFAULT_SELECTION_POLICY,
   evaluateCandidates,
   type IssueSummary,
+  priorityRank,
   type SelectionPolicy,
   type SelectionResult,
   selectNextIssue,
@@ -47,6 +63,9 @@ export {
   type GateDecision,
   type GateInput,
   type GateOutcome,
+  HUMAN_HOLD_LABEL,
+  SELF_PUBLISHED_CHECKS,
+  withoutSelfPublishedChecks,
 } from './merge-gate.ts'
 export {
   isAtLeastRisk,
@@ -58,8 +77,11 @@ export {
   parsePolicy,
   type RiskLevel,
   RiskLevelSchema,
+  reviewersForRisk,
   type Severity,
   SeveritySchema,
+  stepsForRisk,
+  type TierStep,
 } from './policy.ts'
 export {
   blockingFindings,
@@ -75,7 +97,13 @@ export {
   ReviewStatusSchema,
   sanitiseForMarkdown,
 } from './review.ts'
-export { classifyRisk, type RiskAssessment, type RiskReason } from './risk.ts'
+export {
+  classifyRisk,
+  classifyRiskMonotonic,
+  type MonotonicRiskInput,
+  type RiskAssessment,
+  type RiskReason,
+} from './risk.ts'
 export {
   initialState,
   LOOP_STATE_MARKER,

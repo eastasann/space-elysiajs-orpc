@@ -215,8 +215,33 @@ including a security lint that fails the build on an unsafe workflow — read
 
 ## 7. Working inside the autonomous loop
 
-When an Issue is worked by the loop rather than by hand, these rules apply on
-top of §1. Full detail in [`docs/loop-engineering.md`](docs/loop-engineering.md).
+Normal development on this repository is **autonomous**. Issues are implemented,
+verified, reviewed and merged without a person in the middle. Assume:
+
+- **Your pull request may merge without any human reading it.** Nobody is
+  downstream to catch what you missed. Verification requirements are strict
+  because they are the only thing between your change and the default branch.
+- **You cannot approve your own work.** Review is a separate Claude Code
+  invocation with no access to your session, and at high risk there are two of
+  them. A missing or unusable review is never an approval — it blocks.
+- **Weakening policy is forbidden outside an issue that explicitly asks for it.**
+  Do not edit the merge policy, the risk rules, the workflows or this file to
+  make your current pull request easier to merge. That is detected, and it is
+  the one case that still stops for a person.
+- **Do not weaken tests to make a check pass.** Deleting a test, skipping it,
+  adding `.only`, replacing an assertion with one that cannot fail, or reaching
+  for `@ts-nocheck` all raise blocking findings. If a test is genuinely
+  obsolete, say so in the issue.
+- **Report blocked work accurately.** "I could not verify this" is a useful,
+  respectable outcome — the loop marks the issue blocked and moves on. A false
+  claim of completion is not: it merges.
+
+Risk decides how much verification your change must pass, not whether a human is
+summoned. Touching `packages/auth/**` means end-to-end tests, a Docker smoke
+test and two independent reviews — not a wait for approval.
+
+These rules apply on top of §1. Full detail in
+[`docs/loop-engineering.md`](docs/loop-engineering.md).
 
 ### Issue lifecycle
 
@@ -241,24 +266,35 @@ Reference the Issue with `Closes #N` in the body — the loop reads that line to
 link the two, to inherit the Issue's risk label, and to close things out on
 merge.
 
-### Risk and the human gate
+### Risk and verification depth
 
 Risk is computed from the diff, the labels and `.github/loop-policy.json`. It is
 never negotiable from inside a change:
 
 - A `risk:` label can only **escalate**. Labelling a workflow change `risk:low`
   does not make it low.
+- Risk is classified under the **base branch's** policy as well as any policy
+  your change proposes, and the stricter answer wins. Rewriting the rules you
+  are judged by buys nothing.
 - Touching `.github/**`, `tooling/loop/**`, `infra/**`, `packages/auth/**`,
-  `AGENTS.md`, `docs/architecture.md`, `docs/adr/**` or `.env.example` makes a
-  change high risk, which requires human approval before merge.
-- Keep such changes in their own Issue. Folding a one-line workflow tweak into a
-  feature change sends the whole change to the human gate.
+  `docs/architecture.md`, `docs/adr/**` or `.env.example` makes a change high
+  risk: two independent reviews and the strongest verification tier. It still
+  merges automatically once those pass.
+- Keep such changes in their own Issue anyway. Folding a one-line workflow tweak
+  into a feature change makes the whole change pay for the strongest tier.
+
+Editing **this file** is `medium` when you are correcting a command or a path,
+and `high` when you change what the rules say — merge policy, agent permissions,
+safety rules, risk classification, verification requirements. The distinction is
+made from the lines your diff touches, not from the filename.
 
 ### Automated review and the fix loop
 
-A review agent and six deterministic checks evaluate every pull request against
-the Issue's Acceptance Criteria and Out of Scope sections, and against §4 of
-this document. Both emit findings; anything at `high` or above blocks a merge.
+One or two independent review agents — two at high risk, sharing no session with
+each other or with you — and seven deterministic checks evaluate every pull
+request against the Issue's Acceptance Criteria and Out of Scope sections, and
+against §4 of this document. All emit findings; anything at `high` or above
+blocks a merge.
 
 When the loop returns `request_changes`, address **every** finding — or explain
 in the pull request why one is wrong. The retry limit is **3 review rounds**. On
@@ -270,6 +306,12 @@ Do not attempt to influence the gate: do not edit the loop's sticky comment,
 `.github/loop-policy.json`, or the gate check runs as part of a feature change.
 A change that needs the policy relaxed is an architectural decision — stop and
 say so (§2).
+
+The loop compares any proposed policy against the one in force and refuses to
+merge a change that **weakens** a protection: a dropped required check, a lost
+reviewer, a deleted verification step, a raised blocking severity, a removed
+risk rule. Such a change needs a person, which is the only routine reason left
+for one.
 
 ### When the local runner is what is running you
 

@@ -5,6 +5,7 @@ import { checkDebugArtifacts } from './debug-artifacts.ts'
 import { checkDependencies } from './dependencies.ts'
 import { checkMigrations } from './migrations.ts'
 import { checkSecrets } from './secrets.ts'
+import { checkTestIntegrity } from './test-integrity.ts'
 import { checkTestCoverage } from './tests.ts'
 
 export {
@@ -14,6 +15,7 @@ export {
   checkMigrations,
   checkSecrets,
   checkTestCoverage,
+  checkTestIntegrity,
 }
 
 /**
@@ -30,5 +32,6 @@ export function runDeterministicChecks(diff: PullRequestDiff): Finding[] {
     ...checkDependencies(diff),
     ...checkDebugArtifacts(diff),
     ...checkTestCoverage(diff),
+    ...checkTestIntegrity(diff),
   ]
 }
