@@ -533,6 +533,7 @@ jobs:
     permissions:
       contents: write # enablePullRequestAutoMerge and the merge API both write
       pull-requests: write
+      actions: write # tell loop-next-issue the merge happened; see below
     steps:
       - name: Ask GitHub to merge
         uses: actions/github-script@v7
@@ -599,4 +600,28 @@ jobs:
               // so it is reported rather than retried or forced.
               core.warning(`GitHub declined the merge: ${error.message}`)
               core.notice('The ruleset governs this merge; nothing was forced.')
+              return
             }
+
+            // The merge just made is invisible to Actions. GitHub raises no
+            // workflow events for anything GITHUB_TOKEN does, and that includes
+            // a merge this job performs and a merge GitHub completes for an
+            // auto-merge this job enabled. So `loop-next-issue` never sees the
+            // push, the finished issue is never closed, and no next issue is
+            // ever selected: the loop merges once and goes quiet.
+            //
+            // #40 is the worked example. It merged at 08:51:20 and no
+            // `loop-next-issue` run exists for that commit, while #41 — merged
+            // by auto-merge a person had enabled — did raise one.
+            //
+            // Saying so explicitly is the fix. `workflow_dispatch` is exempt
+            // from the no-events rule, which is why the loop's own agent
+            // dispatch has always worked from this same token.
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: 'loop-next-issue.yml',
+              ref: context.payload.repository.default_branch,
+              inputs: { dispatch_agent: 'true' },
+            })
+            core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')

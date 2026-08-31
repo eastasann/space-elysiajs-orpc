@@ -78,14 +78,28 @@ jobs:
             }
 
             const issue_number = Number(closes[1])
-            // GitHub closes the issue itself when the pull request declares it.
-            // All that is left is to clear the loop's own lifecycle labels.
+
+            // This used to assume GitHub had already closed the issue, because
+            // the pull request declares it. Issue #4 shows the assumption does
+            // not hold: #40 merged carrying "Closes #4" and #4 stayed open, so
+            // the loop reported an issue shipped while its own backlog still
+            // listed it as in flight. An unattended loop must not depend on a
+            // side effect it never checks.
+            //
+            // Closing is idempotent, so doing it when GitHub already has costs
+            // one API call and nothing else.
+            const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number })
+            if (issue.state === 'open') {
+              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' })
+              core.notice(`Closed #${issue_number} (shipped by #${merged.number}).`)
+            }
+
             for (const label of ['agent:ready', 'agent:in-progress', 'agent:review', 'agent:blocked']) {
               await github.rest.issues
                 .removeLabel({ owner, repo, issue_number, name: label })
                 .catch(() => {})
             }
-            core.notice(`Cleared loop labels on #${issue_number} (shipped by #${merged.number}).`)
+            core.notice(`Cleared loop labels on #${issue_number}.`)
 
       - name: Read the backlog
         uses: actions/github-script@v7

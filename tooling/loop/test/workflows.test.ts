@@ -516,3 +516,65 @@ describe('an approved pull request does not stall behind its base', () => {
     expect(nextReturn, 'must return before any merge call').toBeLessThan(nextMerge)
   })
 })
+
+describe('the loop keeps going after it merges something', () => {
+  // GitHub raises no workflow events for anything GITHUB_TOKEN does, and that
+  // covers a merge this loop performs and a merge GitHub completes for an
+  // auto-merge the loop enabled. #40 merged and produced no loop-next-issue
+  // run at all, so its issue was never closed and no next issue was selected.
+  // `workflow_dispatch` is exempt, so the merge step has to say so out loud.
+  const mergeStep = workflows
+    .filter((w) => w.file === 'loop-pr.yml')
+    .flatMap(({ doc }) => Object.entries(doc.jobs ?? {}))
+    .flatMap(([job, spec]) => (spec.steps ?? []).map((step) => ({ job, spec, step })))
+    .find(({ step }) => String(step.with?.script ?? '').includes('enablePullRequestAutoMerge'))
+
+  const script = String(mergeStep?.step.with?.script ?? '')
+
+  it('finds the merge step', () => {
+    expect(script).not.toBe('')
+  })
+
+  it('tells loop-next-issue that a merge happened', () => {
+    expect(script).toContain('createWorkflowDispatch')
+    expect(script).toContain('loop-next-issue.yml')
+  })
+
+  it('holds the actions permission that dispatch needs', () => {
+    const permissions = mergeStep?.spec.permissions as Record<string, string> | undefined
+    expect(permissions?.actions).toBe('write')
+  })
+
+  it('only announces a merge that actually happened', () => {
+    // The dispatch must sit after the merge call, and the failure path must
+    // return before reaching it, or a refused merge would still claim success
+    // and the loop would move on from an issue it never shipped.
+    const declined = script.indexOf('declined the merge')
+    const dispatch = script.indexOf('createWorkflowDispatch')
+
+    expect(declined).toBeGreaterThanOrEqual(0)
+    expect(declined, 'the refusal path comes first').toBeLessThan(dispatch)
+    expect(script.slice(declined, dispatch)).toContain('return')
+  })
+})
+
+describe('a shipped issue is actually closed', () => {
+  const closeOut = workflows
+    .filter((w) => w.file === 'loop-next-issue.yml')
+    .flatMap(({ doc }) => Object.values(doc.jobs ?? {}))
+    .flatMap((job) => job.steps ?? [])
+    .find((step) => step.name === 'Close out the merged issue')
+
+  const script = String(closeOut?.with?.script ?? '')
+
+  it('finds the close-out step', () => {
+    expect(script).not.toBe('')
+  })
+
+  // It used to clear labels and trust GitHub's "Closes #N" to do the closing.
+  // #40 merged carrying "Closes #4" and #4 stayed open, so the loop called an
+  // issue shipped while its backlog still listed it as in flight.
+  it('closes the issue rather than assuming GitHub did', () => {
+    expect(script).toContain("state: 'closed'")
+  })
+})
