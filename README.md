@@ -203,13 +203,29 @@ Issues labelled `agent:ready` are implemented, verified, reviewed and merged
 without a person in the middle, by Claude Code running on your own machine with
 your own subscription login. No Anthropic API key is needed.
 
-Prerequisites: [Claude Code](https://code.claude.com) (logged in),
-[GitHub CLI](https://cli.github.com) (`gh auth login`), Bun, Docker.
+By default the agents run **in the cloud**, as Claude Code executions inside
+GitHub Actions. Nothing has to be installed and no machine has to be awake. One
+repository secret turns it on:
+
+```bash
+claude setup-token          # once, anywhere you can run Claude Code
+# add the result as the repository secret CLAUDE_CODE_OAUTH_TOKEN
+```
+
+That token authenticates with your Claude subscription, so **no Anthropic API
+key is needed**. Install the [Claude GitHub App](https://github.com/apps/claude)
+on the repository and the loop runs itself.
+
+The agents' instructions are skills committed under `.claude/skills/`
+(`loop-implement`, `loop-fix`, `loop-review`), reviewed like any other code.
+
+You can also drive the same loop from your own machine — useful offline or when
+debugging a cycle:
 
 ```bash
 bun run loop:status                     # mode, phase, backlog, blockers
 bun run loop:once --dry-run             # the plan; changes nothing
-bun run loop:watch --unattended         # the normal operating mode
+bun run loop:watch --unattended         # from a local clone
 ```
 
 Risk decides how much verification a change must pass, not whether a human is

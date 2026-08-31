@@ -1,7 +1,6 @@
 import type { PullRequestDiff } from '../diff.ts'
 import type { Finding } from '../review.ts'
-
-const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/
+import { isCodeFile } from './paths.ts'
 
 /**
  * Leftovers from writing the change rather than parts of it.
@@ -30,7 +29,7 @@ export function checkDebugArtifacts(diff: PullRequestDiff): Finding[] {
   const findings: Finding[] = []
 
   for (const file of diff.files) {
-    if (!CODE_FILE.test(file.path)) continue
+    if (!isCodeFile(file.path)) continue
 
     for (const { name, pattern, severity } of ARTIFACTS) {
       if (!file.addedLines.some((line) => pattern.test(line))) continue
