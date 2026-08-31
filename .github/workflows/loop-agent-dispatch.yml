@@ -243,16 +243,137 @@ jobs:
             && format('/loop-fix {0} {1}', github.repository, inputs.pull_request)
             || format('/loop-implement {0} {1}', github.repository, inputs.issue) }}
 
+      # --- What the agent actually did --------------------------------------
+      # An unattended loop must be able to answer "why did that run produce
+      # nothing?". Until these steps existed it could not: the agent writes its
+      # log to the runner's temp directory, which is destroyed with the runner.
+      # Three runs against #46 and #50 ended `success` after 7, 11 and 15
+      # minutes with no branch and no pull request, and no account of them
+      # survived. See #50.
+
+      - name: Summarise the agent run
+        id: agent_log
+        if: always() && env.CODING_AGENT_AVAILABLE == 'true'
+        env:
+          EXECUTION_LOG: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          if [ ! -f "$EXECUTION_LOG" ]; then
+            echo "::warning title=No agent log::The agent wrote no execution log."
+            exit 0
+          fi
+
+          # The log holds one `type: result` record. `..|objects` walks it
+          # whether the file is an array, a stream, or a single object, so this
+          # does not depend on a shape the action is free to change.
+          result=$(jq -c '[.. | objects | select(.type? == "result")] | last // empty' \
+            "$EXECUTION_LOG" 2>/dev/null || true)
+
+          if [ -z "$result" ]; then
+            echo "::warning title=No agent result::The execution log holds no result record."
+            exit 0
+          fi
+
+          field() { printf '%s' "$result" | jq -r "(.$1 // \"n/a\") | tostring"; }
+
+          turns=$(field num_turns)
+          denials=$(field permission_denials_count)
+
+          # Outputs, so later steps can react without re-reading the file.
+          {
+            echo "num_turns=$turns"
+            echo "permission_denials=$denials"
+            echo "subtype=$(field subtype)"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Coding agent run"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Result | \`$(field subtype)\` |"
+            echo "| Errored | \`$(field is_error)\` |"
+            echo "| Turns | $turns |"
+            echo "| Permission denials | $denials |"
+            echo "| Duration (ms) | $(field duration_ms) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Denials and a high turn count are the two things that made the
+          # silent runs hard to read, so say them out loud rather than leaving
+          # them in a table nobody opens.
+          if [ "$denials" != "0" ] && [ "$denials" != "n/a" ]; then
+            echo "::warning title=Agent was denied permission::${denials} permission denial(s); the agent may have been unable to do what the issue asked."
+          fi
+
+      - name: Keep the agent's execution log
+        if: always() && env.CODING_AGENT_AVAILABLE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-execution-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Check whether the agent left anything behind
+        id: outcome
+        # Only `implement` holds an issue claim that a silent run can strand. A
+        # fix round pushes to a branch that already exists, so "did it produce
+        # anything?" is a different question and is deliberately not answered
+        # here.
+        if: always() && env.CODING_AGENT_AVAILABLE == 'true' && inputs.mode == 'implement'
+        uses: actions/github-script@v7
+        env:
+          ISSUE: ${{ inputs.issue }}
+        with:
+          script: |
+            const issue_number = Number(process.env.ISSUE)
+            if (!Number.isInteger(issue_number)) {
+              core.setOutput('produced', 'unknown')
+              return
+            }
+
+            // The agent names its branch `agent/issue-<n>-<slug>`, and
+            // sometimes `agent/issue-<n>` with no slug. Match both, and require
+            // the number to end there so `agent/issue-1` does not match
+            // `agent/issue-12`.
+            const prefix = `agent/issue-${issue_number}`
+            const branches = await github.paginate(github.rest.repos.listBranches, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            })
+
+            const produced = branches.some(
+              (branch) => branch.name === prefix || branch.name.startsWith(`${prefix}-`),
+            )
+
+            core.setOutput('produced', produced ? 'true' : 'false')
+            core.info(produced ? `Found a branch for #${issue_number}.` : `No branch for #${issue_number}.`)
+
       - name: Report that the coding agent failed
         # `always()` is load-bearing. Without a status function Actions implies
         # `success()`, which skips this step whenever a previous one failed —
         # precisely when the agent died rather than finished badly, and
         # precisely when the claim most needs clearing. Issue #4 was left
         # `agent:in-progress` with no pull request that way.
-        if: always() && env.CODING_AGENT_AVAILABLE == 'true' && steps.coding_agent.outputs.conclusion != 'success'
+        #
+        # The second clause is the other half of the same lesson. The action
+        # reports `success` whenever the session ends without throwing, which
+        # includes a session that ran out of turns having written nothing. That
+        # is not a failure the action can see, so the claim survived it and the
+        # issue was stranded exactly as a hard failure would have stranded it.
+        # #46 and #50 both went that way. Ending without leaving a branch is
+        # treated as not finishing, whatever the action concluded.
+        if: >-
+          always() && env.CODING_AGENT_AVAILABLE == 'true' &&
+          (steps.coding_agent.outputs.conclusion != 'success' ||
+           steps.outcome.outputs.produced == 'false')
         uses: actions/github-script@v7
         env:
           ISSUE: ${{ inputs.issue }}
+          CONCLUSION: ${{ steps.coding_agent.outputs.conclusion }}
+          PRODUCED: ${{ steps.outcome.outputs.produced }}
+          TURNS: ${{ steps.agent_log.outputs.num_turns }}
+          DENIALS: ${{ steps.agent_log.outputs.permission_denials }}
         with:
           script: |
             // A failed coding pass blocks this issue and nothing else. The loop
@@ -264,15 +385,23 @@ jobs:
             const owner = context.repo.owner
             const repo = context.repo.repo
 
+            const ranDry = process.env.CONCLUSION === 'success' && process.env.PRODUCED === 'false'
+            const numbers = [
+              process.env.TURNS ? `turns: ${process.env.TURNS}` : null,
+              process.env.DENIALS ? `permission denials: ${process.env.DENIALS}` : null,
+            ].filter(Boolean)
+
             await github.rest.issues.createComment({
               owner, repo, issue_number,
               body: [
                 '### Coding agent did not finish',
                 '',
-                'The run ended without success. The issue is marked `agent:blocked`',
-                'so the loop moves on to independent work; nothing else waits on it.',
+                ranDry
+                  ? 'The run ended without error but left no branch, so nothing was implemented. The issue is marked `agent:blocked` so the loop moves on to independent work; nothing else waits on it.'
+                  : 'The run ended without success. The issue is marked `agent:blocked` so the loop moves on to independent work; nothing else waits on it.',
+                ...(numbers.length > 0 ? ['', `Agent run: ${numbers.join(', ')}.`] : []),
                 '',
-                `[Run log](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,
+                `[Run log](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}) — the agent's own execution log is attached to that run as an artifact.`,
               ].join('\n'),
             })
             await github.rest.issues.addLabels({
