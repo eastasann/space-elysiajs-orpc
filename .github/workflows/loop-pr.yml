@@ -550,9 +550,33 @@ jobs:
             const repo = context.repo.repo
             const pull_number = Number(process.env.PULL_NUMBER)
 
+            // Both paths that end in a merged pull request funnel through this,
+            // because a merge nothing announces is a merge the loop never
+            // notices. See the block below the merge call for why announcing is
+            // necessary at all.
+            const announce = async () => {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'loop-next-issue.yml',
+                ref: context.payload.repository.default_branch,
+                inputs: { dispatch_agent: 'true' },
+              })
+              core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')
+            }
+
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number })
             if (pr.merged) {
-              core.info('Already merged.')
+              // Reached when auto-merge completed the merge after an earlier run
+              // enabled it. That merge raised no event either, so this is the
+              // only place it can be announced — and returning here without
+              // announcing is what made the deferred path silently stall.
+              //
+              // Announcing twice is harmless: closing the issue is idempotent,
+              // and selection skips an issue already claimed. Announcing zero
+              // times is not.
+              core.info('Already merged; announcing it.')
+              await announce()
               return
             }
 
@@ -648,11 +672,4 @@ jobs:
             // Saying so explicitly is the fix. `workflow_dispatch` is exempt
             // from the no-events rule, which is why the loop's own agent
             // dispatch has always worked from this same token.
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: 'loop-next-issue.yml',
-              ref: context.payload.repository.default_branch,
-              inputs: { dispatch_agent: 'true' },
-            })
-            core.info('Asked loop-next-issue to reconcile the issue and pick the next one.')
+            await announce()

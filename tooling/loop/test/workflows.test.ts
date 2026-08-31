@@ -540,20 +540,46 @@ describe('the loop keeps going after it merges something', () => {
     expect(script).toContain('loop-next-issue.yml')
   })
 
+  // A reviewer caught the deferred path: when auto-merge completes the merge
+  // later, the next gate run hits `if (pr.merged)` and returned there, above
+  // the dispatch, so that merge was never announced. Both endings that leave a
+  // merged pull request have to reach the same announcement.
+  it('announces a merge an earlier run deferred', () => {
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const merged = code.indexOf('if (pr.merged)')
+    expect(merged, 'the already-merged branch exists').toBeGreaterThanOrEqual(0)
+
+    const branch = code.slice(merged, code.indexOf('return', merged))
+    expect(branch, 'and announces before returning').toContain('announce()')
+  })
+
   it('holds the actions permission that dispatch needs', () => {
     const permissions = mergeStep?.spec.permissions as Record<string, string> | undefined
     expect(permissions?.actions).toBe('write')
   })
 
   it('only announces a merge that actually happened', () => {
-    // The dispatch must be reached only on the path that merged, or the loop
-    // would move on from an issue it never shipped.
-    const dispatch = script.indexOf('createWorkflowDispatch')
-    const notMerged = script.indexOf('if (!merged)')
+    // The unmerged path must return without announcing, or the loop would move
+    // on from an issue it never shipped. Asserted against the branch itself
+    // rather than the position of the dispatch call, which now lives in a
+    // helper at the top of the script and so precedes every branch.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
 
-    expect(notMerged).toBeGreaterThanOrEqual(0)
-    expect(notMerged, 'the unmerged path is handled first').toBeLessThan(dispatch)
-    expect(script.slice(notMerged, dispatch), 'and returns before the dispatch').toContain('return')
+    const at = code.indexOf('if (!merged)')
+    expect(at, 'the unmerged branch exists').toBeGreaterThanOrEqual(0)
+
+    // The YAML block scalar is de-indented when parsed, so the branch closes on
+    // a brace at column zero, not at the indentation seen in the file.
+    const branch = code.slice(at, code.indexOf('\n}', at))
+    expect(branch, 'it returns').toContain('return')
+    expect(branch, 'without announcing').not.toContain('announce()')
   })
 
   // Both reviewers on #42 caught this: the dispatch sat only after the direct
