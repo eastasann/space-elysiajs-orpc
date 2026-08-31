@@ -94,7 +94,12 @@ jobs:
       pull-requests: write # sticky comment and labels
       issues: write # lifecycle labels on the linked issue
       checks: write # publish loop/risk-gate and loop/review-gate
-      actions: read # read the triggering CI run
+      # `read` for the triggering CI run, `write` because requesting a fix round
+      # dispatches loop-agent-dispatch. With only `read` that step failed with
+      # "Resource not accessible by integration", so a review that requested
+      # changes went nowhere and the pull request simply stopped — #43 is the
+      # worked example. This grants the ability to start a workflow, not to push.
+      actions: write
       id-token: write # the review agent's action mints its App token via OIDC
     steps:
       - name: Resolve the pull request

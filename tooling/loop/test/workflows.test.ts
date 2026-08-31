@@ -578,3 +578,32 @@ describe('a shipped issue is actually closed', () => {
     expect(script).toContain("state: 'closed'")
   })
 })
+
+describe('a job that starts another workflow may actually do so', () => {
+  // Two steps in this loop dispatch a workflow, and both failed the same way
+  // before this lint existed: "Resource not accessible by integration", because
+  // `createWorkflowDispatch` needs `actions: write` and the job granted `read`.
+  // The gate could therefore never request a fix round, so a review that asked
+  // for changes went nowhere (#43), and the merge step could not tell
+  // loop-next-issue that a merge had happened (#40).
+  const dispatchers = workflows.flatMap(({ file, doc }) =>
+    Object.entries(doc.jobs ?? {})
+      .filter(([, job]) =>
+        (job.steps ?? []).some((step) =>
+          String(step.with?.script ?? '').includes('createWorkflowDispatch'),
+        ),
+      )
+      .map(([name, job]) => ({ file, name, job })),
+  )
+
+  it('finds the jobs that dispatch a workflow', () => {
+    expect(dispatchers.length).toBeGreaterThan(0)
+  })
+
+  it('grants actions: write wherever a workflow is dispatched', () => {
+    for (const { file, name, job } of dispatchers) {
+      const permissions = job.permissions as Record<string, string> | undefined
+      expect(permissions?.actions, `${file}#${name}`).toBe('write')
+    }
+  })
+})
