@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'bun:test'
+import type { FindingRecord } from '../src/recurrence.ts'
 import { initialState, parseLoopState, recordRound, serialiseLoopState } from '../src/state.ts'
 
 const NOW = '2026-08-30T15:00:00.000Z'
+
+const FINDING_RECORD: FindingRecord = {
+  severity: 'high',
+  file: 'apps/api/src/modules/dedup/service.ts',
+  description: 'representative lookup misses the batch group union',
+  category: 'correctness',
+}
 
 describe('loop state round trip', () => {
   it('survives serialisation', () => {
@@ -103,5 +111,70 @@ describe('recordRound', () => {
     }
 
     expect(state.history).toHaveLength(25)
+  })
+
+  it('retains a round’s findings so a later round can detect recurrence', () => {
+    const state = recordRound({
+      state: initialState(1),
+      headSha: 'a',
+      reviewStatus: 'request_changes',
+      decision: 'changes_requested',
+      at: NOW,
+      findings: [FINDING_RECORD],
+    })
+
+    expect(state.history[0]?.findings).toEqual([FINDING_RECORD])
+  })
+
+  it('bounds findings retained per round', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ ...FINDING_RECORD, category: `c${i}` }))
+    const state = recordRound({
+      state: initialState(1),
+      headSha: 'a',
+      reviewStatus: 'request_changes',
+      decision: 'changes_requested',
+      at: NOW,
+      findings: many,
+    })
+
+    expect(state.history[0]?.findings.length).toBeLessThanOrEqual(10)
+  })
+
+  it('defaults to no retained findings when none are given', () => {
+    const state = recordRound({
+      state: initialState(1),
+      headSha: 'a',
+      reviewStatus: 'approve',
+      decision: 'auto_merge',
+      at: NOW,
+    })
+
+    expect(state.history[0]?.findings).toEqual([])
+  })
+})
+
+describe('parseLoopState with retained findings', () => {
+  it('defaults missing findings to an empty array for a comment written before this field existed', () => {
+    const legacy =
+      '<!-- newsdeck-loop-state -->\n\n```json\n' +
+      JSON.stringify({
+        version: 1,
+        issue: 1,
+        reviewAttempts: 1,
+        lastReviewStatus: 'request_changes',
+        lastDecision: 'changes_requested',
+        history: [
+          {
+            at: NOW,
+            headSha: 'a',
+            attempt: 0,
+            reviewStatus: 'request_changes',
+            decision: 'changes_requested',
+          },
+        ],
+      }) +
+      '\n```'
+
+    expect(parseLoopState(legacy, 1).history[0]?.findings).toEqual([])
   })
 })

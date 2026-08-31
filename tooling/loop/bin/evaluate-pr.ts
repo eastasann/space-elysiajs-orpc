@@ -23,7 +23,8 @@ import { findUnsafeWorkflowChanges, findWeakenedProtections } from '../src/contr
 import { parseUnifiedDiff } from '../src/diff.ts'
 import { decideMerge, HUMAN_HOLD_LABEL } from '../src/merge-gate.ts'
 import { parsePolicy, reviewersForRisk } from '../src/policy.ts'
-import { mergeReview, parseReviewText, type ReviewResult } from '../src/review.ts'
+import { detectRecurrence, toFindingRecord } from '../src/recurrence.ts'
+import { blockingFindings, mergeReview, parseReviewText, type ReviewResult } from '../src/review.ts'
 import { classifyRiskMonotonic } from '../src/risk.ts'
 import { parseLoopState, recordRound, serialiseLoopState } from '../src/state.ts'
 import { renderPullRequestSummary } from '../src/summary.ts'
@@ -152,12 +153,26 @@ const outcome = decideMerge({
 
 const review = outcome.review
 
+// Findings only mean anything for recurrence once compared against a *prior*
+// attempt's, so this reads `previous.history` before the current round is
+// appended to it below.
+const recurrence = detectRecurrence(review.findings, previous.history, context.pullRequest.headSha)
+
+// Retaining findings from a round that did not ask for changes would remember
+// things no fix round will ever need to have recalled — `waiting` and
+// `auto_merge` rounds keep nothing.
+const retainedFindings =
+  outcome.decision === 'changes_requested'
+    ? blockingFindings(review.findings, policy.review.blockingSeverity).map(toFindingRecord)
+    : []
+
 const state = recordRound({
   state: { ...previous, issue },
   headSha: context.pullRequest.headSha,
   reviewStatus: review.status,
   decision: outcome.decision,
   at: new Date().toISOString(),
+  findings: retainedFindings,
 })
 
 const summary = renderPullRequestSummary({
@@ -171,6 +186,7 @@ const summary = renderPullRequestSummary({
     name,
     conclusion: context.checks.find((check) => check.name === name)?.conclusion ?? 'missing',
   })),
+  recurrence,
 })
 
 const outputDir = process.env.LOOP_OUTPUT_DIR ?? '.loop'
@@ -178,7 +194,7 @@ mkdirSync(outputDir, { recursive: true })
 
 writeFileSync(
   join(outputDir, 'result.json'),
-  `${JSON.stringify({ risk, review, outcome, state, issue }, null, 2)}\n`,
+  `${JSON.stringify({ risk, review, outcome, state, issue, recurrence }, null, 2)}\n`,
 )
 writeFileSync(join(outputDir, 'summary.md'), `${summary}\n\n${serialiseLoopState(state)}\n`)
 

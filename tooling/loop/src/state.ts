@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { type FindingRecord, FindingRecordSchema, MAX_RETAINED_FINDINGS } from './recurrence.ts'
 import { ReviewStatusSchema } from './review.ts'
 
 /**
@@ -34,6 +35,12 @@ export const LoopStateSchema = z.object({
         attempt: z.number().int().min(0),
         reviewStatus: ReviewStatusSchema,
         decision: GateDecisionSchema,
+        /**
+         * Findings this round raised, kept small enough to survive several
+         * rounds in one comment. Absent on comments written before this field
+         * existed, and on rounds that retained none — both read as `[]`.
+         */
+        findings: z.array(FindingRecordSchema).max(MAX_RETAINED_FINDINGS).default([]),
       }),
     )
     .max(25),
@@ -88,6 +95,8 @@ export interface RecordRoundInput {
   reviewStatus: z.infer<typeof ReviewStatusSchema>
   decision: z.infer<typeof GateDecisionSchema>
   at: string
+  /** Findings worth remembering for recurrence detection in a later round. */
+  findings?: readonly FindingRecord[]
 }
 
 /**
@@ -103,6 +112,7 @@ export function recordRound({
   reviewStatus,
   decision,
   at,
+  findings = [],
 }: RecordRoundInput): LoopState {
   const consumed = decision === 'changes_requested'
 
@@ -113,7 +123,14 @@ export function recordRound({
     lastDecision: decision,
     history: [
       ...state.history,
-      { at, headSha, attempt: state.reviewAttempts, reviewStatus, decision },
+      {
+        at,
+        headSha,
+        attempt: state.reviewAttempts,
+        reviewStatus,
+        decision,
+        findings: findings.slice(0, MAX_RETAINED_FINDINGS),
+      },
     ].slice(-25),
   }
 }

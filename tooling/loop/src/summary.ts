@@ -1,5 +1,6 @@
 import type { Candidate } from './eligibility.ts'
 import type { GateOutcome } from './merge-gate.ts'
+import type { RecurringFinding } from './recurrence.ts'
 import type { ReviewResult } from './review.ts'
 import { sanitiseForMarkdown } from './review.ts'
 import type { RiskAssessment } from './risk.ts'
@@ -22,6 +23,8 @@ export interface PullRequestView {
   maxReviewAttempts: number
   /** Names and conclusions of the required checks, for the status table. */
   checks: ReadonlyArray<{ name: string; conclusion: string }>
+  /** This round's findings that also appeared in an earlier attempt. */
+  recurrence: readonly RecurringFinding[]
 }
 
 function table(rows: ReadonlyArray<[string, string]>): string {
@@ -84,6 +87,23 @@ export function renderPullRequestSummary(view: PullRequestView): string {
       '| Severity | File | Description | Suggested action |',
       '| --- | --- | --- | --- |',
       findings,
+    )
+  }
+
+  if (view.recurrence.length > 0) {
+    sections.push(
+      '',
+      '**Recurring findings** — already raised in an earlier attempt on this pull request',
+      '',
+      ...view.recurrence.map((recurring) => {
+        const heads = recurring.occurrences
+          .map(
+            (occurrence) =>
+              `attempt ${occurrence.attempt} (\`${occurrence.headSha.slice(0, 12)}\`)`,
+          )
+          .join(', ')
+        return `- ${sanitiseForMarkdown(recurring.finding.description)} — survived ${heads}. Diff those heads to see what was tried before attempting another fix.`
+      }),
     )
   }
 

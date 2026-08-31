@@ -84,6 +84,17 @@ export {
   type TierStep,
 } from './policy.ts'
 export {
+  detectRecurrence,
+  type FindingRecord,
+  FindingRecordSchema,
+  findingsMatch,
+  type HistoryFindingsEntry,
+  MAX_RETAINED_FINDINGS,
+  type RecurrenceOccurrence,
+  type RecurringFinding,
+  toFindingRecord,
+} from './recurrence.ts'
+export {
   blockingFindings,
   type Finding,
   FindingSchema,
