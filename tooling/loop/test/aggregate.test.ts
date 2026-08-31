@@ -214,6 +214,35 @@ describe('test integrity', () => {
     expect(findings).toEqual([])
   })
 
+  // Assembled for the same reason as `marker` above: written literally, the
+  // string would be flagged in every pull request that touches this file.
+  const nocheck = `// @ts-${'nocheck'}`
+
+  it('says nothing about prose that describes a suppression', () => {
+    const findings = checkTestIntegrity(
+      diffOf([{ path: '.claude/skills/loop-fix/SKILL.md', added: [`Never add ${nocheck}.`] }]),
+    )
+
+    expect(findings).toEqual([])
+  })
+
+  it('says nothing about a marker named in a fixture beside the tests', () => {
+    const findings = checkTestIntegrity(
+      diffOf([{ path: 'apps/api/test/fixtures/notes.md', added: [marker('only')] }]),
+    )
+
+    expect(findings).toEqual([])
+  })
+
+  it('does not call a deleted fixture a deleted test', () => {
+    const diff = diffOf([{ path: 'apps/api/test/fixtures/sources.json' }])
+    const file = diff.files[0]
+    if (file === undefined) throw new Error('expected one file in the fixture')
+    file.status = 'removed'
+
+    expect(checkTestIntegrity(diff)).toEqual([])
+  })
+
   it('does not flag a narrow, explained suppression', () => {
     const findings = checkTestIntegrity(
       diffOf([

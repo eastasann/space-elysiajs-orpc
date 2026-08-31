@@ -1,6 +1,7 @@
 import type { DiffFile, PullRequestDiff } from '../diff.ts'
 import { matchesAnyGlob } from '../glob.ts'
 import type { Finding } from '../review.ts'
+import { isCodeFile } from './paths.ts'
 
 /**
  * Tests weakened rather than satisfied.
@@ -45,6 +46,10 @@ export function checkTestIntegrity(diff: PullRequestDiff): Finding[] {
   const findings: Finding[] = []
 
   for (const file of diff.files) {
+    // Every rule below reads the text of a change, so it only means anything in
+    // code. `**/test/**` also covers fixtures and the notes beside them.
+    if (!isCodeFile(file.path)) continue
+
     const isTest = matchesAnyGlob(TEST_GLOBS, file.path)
 
     if (isTest && file.status === 'removed') {

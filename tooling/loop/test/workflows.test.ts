@@ -301,7 +301,7 @@ describe('the cloud agent integration', () => {
 
   it('names the bots it allows rather than allowing all of them', () => {
     for (const { file, step } of agentSteps) {
-      const allowed = String((step.with ?? {}).allowed_bots ?? '')
+      const allowed = String(step.with?.allowed_bots ?? '')
       expect(allowed, `${file}: ${step.name} must set allowed_bots`).not.toBe('')
       // `*` would let any installed GitHub App trigger the agent with a prompt
       // it controls. The action's own documentation warns about it.
@@ -319,7 +319,7 @@ describe('the cloud agent integration', () => {
     // Every prompt invokes a skill, so the instructions are reviewable code
     // rather than a string buried in YAML.
     for (const { file, step } of agentSteps) {
-      const prompt = String((step.with ?? {}).prompt ?? '')
+      const prompt = String(step.with?.prompt ?? '')
       expect(
         prompt.trim().startsWith('/') || prompt.includes('/loop-'),
         `${file}: ${step.name}`,
