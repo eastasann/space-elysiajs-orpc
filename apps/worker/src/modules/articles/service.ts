@@ -61,38 +61,64 @@ interface InBatchDuplicate {
 
 /**
  * Collapses duplicates within the batch before anything touches the
- * database. A single forward pass: each candidate is linked to the earliest
- * candidate it shares a `canonicalUrl` or `contentHash` with, and both of its
- * keys are then registered against that same representative so a later
- * candidate that only shares one key still joins the same group.
+ * database. Candidates are grouped with a union-find over their indexes:
+ * whichever key (`canonicalUrl` or `contentHash`) a candidate shares with an
+ * earlier one merges their two groups, so a candidate that bridges two
+ * groups already established independently — one by url, the other by hash —
+ * folds both into one instead of leaving two representatives standing.
  */
 function collapseInBatchDuplicates(candidates: ArticleCandidate[]): {
   representativeIndexes: number[]
   duplicates: Map<number, InBatchDuplicate>
 } {
-  const canonicalUrlToRepresentative = new Map<string, number>()
-  const contentHashToRepresentative = new Map<string, number>()
-  const representativeIndexes: number[] = []
+  const canonicalUrlToIndex = new Map<string, number>()
+  const contentHashToIndex = new Map<string, number>()
+  const parent = new Map<number, number>()
   const duplicates = new Map<number, InBatchDuplicate>()
 
-  candidates.forEach((candidate, index) => {
-    const byUrl = canonicalUrlToRepresentative.get(candidate.canonicalUrl)
-    const byHash = contentHashToRepresentative.get(candidate.contentHash)
-    const representativeIndex = byUrl ?? byHash
+  function find(index: number): number {
+    const above = parent.get(index)
+    if (above === undefined) return index
+    const root = find(above)
+    parent.set(index, root)
+    return root
+  }
 
-    if (representativeIndex !== undefined) {
-      duplicates.set(index, {
-        reason: byUrl !== undefined ? 'canonical-url' : 'content-hash',
-        duplicateOfIndex: representativeIndex,
-      })
-      canonicalUrlToRepresentative.set(candidate.canonicalUrl, representativeIndex)
-      contentHashToRepresentative.set(candidate.contentHash, representativeIndex)
+  // The earlier-indexed root always wins, so the survivor of any merge is
+  // the group's earliest candidate — matching the fact that a later
+  // candidate can only ever be a duplicate of something already seen.
+  function union(a: number, b: number, reason: ArticleMatchReason): void {
+    const rootA = find(a)
+    const rootB = find(b)
+    if (rootA === rootB) return
+    const winner = Math.min(rootA, rootB)
+    const loser = Math.max(rootA, rootB)
+    parent.set(loser, winner)
+    duplicates.set(loser, { reason, duplicateOfIndex: winner })
+  }
+
+  candidates.forEach((candidate, index) => {
+    const byUrl = canonicalUrlToIndex.get(candidate.canonicalUrl)
+    const byHash = contentHashToIndex.get(candidate.contentHash)
+
+    if (byUrl !== undefined) union(index, byUrl, 'canonical-url')
+    if (byHash !== undefined) union(index, byHash, 'content-hash')
+
+    canonicalUrlToIndex.set(candidate.canonicalUrl, index)
+    contentHashToIndex.set(candidate.contentHash, index)
+  })
+
+  const representativeIndexes: number[] = []
+  candidates.forEach((_, index) => {
+    if (find(index) === index) {
+      representativeIndexes.push(index)
       return
     }
-
-    canonicalUrlToRepresentative.set(candidate.canonicalUrl, index)
-    contentHashToRepresentative.set(candidate.contentHash, index)
-    representativeIndexes.push(index)
+    // A merge recorded further down the batch can fold this index's group
+    // into yet another one afterwards — resolve to the final root so every
+    // duplicate points at the representative that was actually looked up.
+    const recorded = duplicates.get(index) as InBatchDuplicate
+    duplicates.set(index, { ...recorded, duplicateOfIndex: find(index) })
   })
 
   return { representativeIndexes, duplicates }

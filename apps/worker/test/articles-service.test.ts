@@ -220,6 +220,43 @@ describe('dedupeAndPersist', () => {
     })
   })
 
+  it('merges two independently-established batch groups when a later candidate bridges them', async () => {
+    const repository = fakeArticlesRepository()
+    const service = createArticlesService(repository)
+    // groupA and groupB share nothing with each other, so each becomes its
+    // own representative — until bridge arrives sharing a canonical_url with
+    // groupA and a content_hash with groupB, which should fold all three
+    // into a single group and a single insert.
+    const groupA = fakeCandidate()
+    const groupB = fakeCandidate()
+    const bridge = fakeCandidate({
+      canonicalUrl: groupA.canonicalUrl,
+      contentHash: groupB.contentHash,
+    })
+
+    const result = await service.dedupeAndPersist({
+      sourceId: 'source-1',
+      fetchedAt: new Date(),
+      candidates: [groupA, groupB, bridge],
+    })
+
+    expect(result.insertedCount).toBe(1)
+    expect(result.duplicateInBatchCount).toBe(2)
+    expect(repository.rows).toHaveLength(1)
+
+    expect(result.outcomes[0]?.outcome.status).toBe('inserted')
+    expect(result.outcomes[1]?.outcome).toEqual({
+      status: 'duplicate-in-batch',
+      reason: 'content-hash',
+      duplicateOfIndex: 0,
+    })
+    expect(result.outcomes[2]?.outcome).toEqual({
+      status: 'duplicate-in-batch',
+      reason: 'canonical-url',
+      duplicateOfIndex: 0,
+    })
+  })
+
   it('reports a genuinely new candidate alongside duplicates without dropping either', async () => {
     const repository = fakeArticlesRepository()
     const service = createArticlesService(repository)
