@@ -34,6 +34,8 @@ COPY packages/db/package.json packages/db/package.json
 COPY packages/jobs/package.json packages/jobs/package.json
 COPY packages/logger/package.json packages/logger/package.json
 COPY packages/ui/package.json packages/ui/package.json
+COPY tooling/local-runner/package.json tooling/local-runner/package.json
+COPY tooling/loop/package.json tooling/loop/package.json
 # Networks that intercept TLS (corporate proxies, some CI egress gateways) can
 # drop connections when many run at once, which surfaces as spurious
 # certificate errors. Lower this to build behind one:

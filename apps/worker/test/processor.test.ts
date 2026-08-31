@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { heartbeatJob, type JobDefinition } from '@newsdeck/jobs'
+import { heartbeatJob, type JobDefinition, type QueuedJob } from '@newsdeck/jobs'
 import { createLogger } from '@newsdeck/logger'
-import type { Job } from 'bullmq'
 import { z } from 'zod'
 import { type AnyJobHandler, createHandlerRegistry } from '../src/handlers/registry.ts'
 import { createProcessor, InvalidJobPayloadError, UnknownJobError } from '../src/processor.ts'
@@ -23,8 +22,11 @@ function collectingLogger() {
   return { logger, records }
 }
 
-function fakeJob(name: string, data: unknown): Job {
-  return { id: 'job-1', name, data } as Job
+function fakeJob(name: string, data: unknown): QueuedJob {
+  // `QueuedJob` rather than bullmq's `Job`: applications never name the queue
+  // implementation, and `apps/worker` does not declare bullmq as a dependency.
+  // It resolved on a machine with a stale `node_modules` and failed in CI.
+  return { id: 'job-1', name, data } as QueuedJob
 }
 
 function recordingHandler(definition: JobDefinition<{ requestId?: string }>) {
