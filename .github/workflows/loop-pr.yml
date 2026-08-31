@@ -595,9 +595,13 @@ jobs:
               // only place it can be announced — and returning here without
               // announcing is what made the deferred path silently stall.
               //
-              // Announcing twice is harmless: closing the issue is idempotent,
-              // and selection skips an issue already claimed. Announcing zero
-              // times is not.
+              // Announcing twice is cheap, not free. Closing the issue is
+              // idempotent, but selection is only advisory: the claim happens
+              // later, in the separately dispatched agent run, so two
+              // announcements close together can both select the same next
+              // issue and start two coding agents on it. The cost is a wasted
+              // agent run; the cost of announcing zero times is a merge the
+              // loop never notices. Preferring the first is deliberate.
               core.info('Already merged; announcing it.')
               await announce()
               return

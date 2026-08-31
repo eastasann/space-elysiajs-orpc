@@ -508,10 +508,22 @@ describe('an approved pull request does not stall behind its base', () => {
   // merges is not the head that was reviewed. Returning after the update is
   // what sends it back through CI and this gate.
   it('re-runs the gate on the updated head instead of merging it unreviewed', () => {
-    const afterUpdate = script.slice(script.indexOf('updateBranch'))
+    // Comments stripped first. Without that, `indexOf('updateBranch')` matched
+    // the explanation above the call and `indexOf('return')` matched the word
+    // "returns" inside that same comment, so the assertion held no matter what
+    // the code did — this test passed with the safety return deleted, which is
+    // the one regression it exists to catch.
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+
+    const afterUpdate = code.slice(code.indexOf('updateBranch'))
     const nextReturn = afterUpdate.indexOf('return')
     const nextMerge = afterUpdate.indexOf('pulls.merge')
 
+    expect(afterUpdate, 'the call is present in code, not just prose').toContain('updateBranch')
+    expect(nextMerge, 'and a merge call follows it').toBeGreaterThanOrEqual(0)
     expect(nextReturn).toBeGreaterThanOrEqual(0)
     expect(nextReturn, 'must return before any merge call').toBeLessThan(nextMerge)
   })
