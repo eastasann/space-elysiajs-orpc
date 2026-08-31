@@ -36,3 +36,52 @@ test.describe('admin application', () => {
     )
   })
 })
+
+test.describe('source management', () => {
+  test('creates a source, shows it in the list, then deactivates it', async ({ page }) => {
+    const unique = Date.now()
+    const name = `E2E Source ${unique}`
+    const feedUrl = `https://example.test/e2e-${unique}/feed.xml`
+
+    await page.goto('/sources')
+
+    await page.getByLabel('Name').fill(name)
+    await page.getByLabel('Feed URL').fill(feedUrl)
+    await page.getByRole('button', { name: 'Add source' }).click()
+
+    const row = page.getByRole('row', { name: new RegExp(name) })
+    await expect(row).toBeVisible()
+    await expect(row.locator('.nd-badge')).toHaveText('active')
+
+    // The form clears without a navigation: proves the create happened over
+    // the mutation, not a full page reload.
+    await expect(page.getByLabel('Name')).toHaveValue('')
+
+    await row.getByRole('button', { name: 'Deactivate' }).click()
+
+    await expect(row.locator('.nd-badge')).toHaveText('inactive')
+    await expect(row.getByRole('button', { name: 'Deactivate' })).toHaveCount(0)
+  })
+
+  test('shows a clear message for a duplicate feed url instead of a generic failure', async ({
+    page,
+  }) => {
+    const unique = Date.now()
+    const name = `E2E Duplicate ${unique}`
+    const feedUrl = `https://example.test/e2e-dup-${unique}/feed.xml`
+
+    await page.goto('/sources')
+
+    await page.getByLabel('Name').fill(name)
+    await page.getByLabel('Feed URL').fill(feedUrl)
+    await page.getByRole('button', { name: 'Add source' }).click()
+    await expect(page.getByRole('row', { name: new RegExp(name) })).toBeVisible()
+
+    await page.getByLabel('Name').fill(`${name} again`)
+    await page.getByLabel('Feed URL').fill(feedUrl)
+    await page.getByRole('button', { name: 'Add source' }).click()
+
+    await expect(page.getByText('A source with this feed URL already exists.')).toBeVisible()
+    await expect(page.getByRole('row', { name: new RegExp(`${name} again`) })).toHaveCount(0)
+  })
+})

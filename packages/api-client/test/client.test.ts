@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { REQUEST_ID_HEADER as LOGGER_HEADER } from '@newsdeck/logger'
-import { createApiClient, newRequestId, REQUEST_ID_HEADER } from '../src/index.ts'
+import { createApiClient, isDefinedError, newRequestId, REQUEST_ID_HEADER } from '../src/index.ts'
 
 describe('createApiClient', () => {
   it('exposes both a direct client and TanStack Query bindings', () => {
@@ -15,6 +15,12 @@ describe('createApiClient', () => {
     const { orpc } = createApiClient({ baseUrl: 'http://api.test/rpc' })
 
     expect(JSON.stringify(orpc.system.status.queryOptions().queryKey)).toContain('system')
+  })
+})
+
+describe('isDefinedError', () => {
+  it('does not narrow a plain error', () => {
+    expect(isDefinedError(new Error('boom'))).toBe(false)
   })
 })
 

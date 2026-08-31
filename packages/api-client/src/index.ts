@@ -9,6 +9,8 @@
  */
 
 export type { ApiClient } from '@newsdeck/api-contract'
+/** Narrows a caught error to the typed oRPC error a contract declares, e.g. by `.code`. */
+export { isDefinedError } from '@orpc/client'
 export {
   type ApiClientBundle,
   type CreateApiClientOptions,

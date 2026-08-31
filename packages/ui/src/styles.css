@@ -192,3 +192,68 @@ a {
 .nd-table td {
   font-family: var(--nd-mono);
 }
+
+.nd-row-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.nd-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 28rem;
+}
+
+.nd-form--inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  max-width: none;
+}
+
+.nd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--nd-text-muted);
+}
+
+.nd-form--inline .nd-field {
+  min-width: 12rem;
+}
+
+.nd-input {
+  font: inherit;
+  color: var(--nd-text);
+  background: var(--nd-surface-raised);
+  border: 1px solid var(--nd-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+}
+
+.nd-input:focus {
+  outline: 2px solid var(--nd-accent);
+  outline-offset: 1px;
+}
+
+.nd-field__error {
+  margin: 0;
+  color: var(--nd-error);
+  font-size: 0.8rem;
+}
+
+.nd-form__error {
+  margin: 0;
+  color: var(--nd-error);
+  font-size: 0.85rem;
+}
+
+.nd-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}

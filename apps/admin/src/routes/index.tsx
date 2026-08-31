@@ -81,8 +81,8 @@ function Dashboard() {
 
       <Panel title="Not implemented yet" description="Tracked as GitHub Issues.">
         <p className="nd-note">
-          Source management, article management, category management, user management, comment
-          moderation and failed-job inspection are part of the roadmap, not of this bootstrap.
+          Article management, category management, user management, comment moderation and
+          failed-job inspection are part of the roadmap, not of this bootstrap.
         </p>
       </Panel>
     </>
