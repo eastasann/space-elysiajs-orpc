@@ -8,6 +8,13 @@
       "when": 1788096366268,
       "tag": "0000_first_rocket_raccoon",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788164505031,
+      "tag": "0001_dark_johnny_storm",
+      "breakpoints": true
     }
   ]
 }

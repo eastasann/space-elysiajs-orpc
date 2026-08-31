@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { eq, sql } from 'drizzle-orm'
 import type { DatabaseHandle } from '../src/index.ts'
 import { createDatabase, probeDatabase, runMigrations } from '../src/index.ts'
-import { userIdentities, users } from '../src/schema/index.ts'
+import { sources, userIdentities, users } from '../src/schema/index.ts'
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL
 
@@ -30,6 +30,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
     handle = createDatabase({ url: TEST_DATABASE_URL as string, maxConnections: 2 })
     await runMigrations(handle)
     await handle.db.execute(sql`truncate table ${users} restart identity cascade`)
+    await handle.db.execute(sql`truncate table ${sources} restart identity cascade`)
   })
 
   afterAll(async () => {
@@ -45,6 +46,7 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
 
     expect(names).toContain('users')
     expect(names).toContain('user_identities')
+    expect(names).toContain('sources')
   })
 
   it('is idempotent when applied twice', async () => {
@@ -134,6 +136,32 @@ describe.skipIf(!TEST_DATABASE_URL)('database migrations and constraints', () =>
 
     expect(result.ok).toBe(true)
     expect(result.latencyMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('inserts a source and rejects a duplicate feed url', async () => {
+    const [inserted] = await handle.db
+      .insert(sources)
+      .values({ name: 'Example Feed', feedUrl: 'https://example.test/feed.xml' })
+      .returning()
+    const source = required(inserted, 'source')
+
+    expect(source.isActive).toBe(true)
+
+    let caught: unknown
+    try {
+      await handle.db
+        .insert(sources)
+        .values({ name: 'Duplicate Feed', feedUrl: 'https://example.test/feed.xml' })
+    } catch (error) {
+      caught = error
+    }
+
+    const cause = (caught as { cause?: { constraint_name?: string; code?: string } } | undefined)
+      ?.cause
+
+    expect(caught).toBeDefined()
+    expect(cause?.code).toBe('23505')
+    expect(cause?.constraint_name).toBe('sources_feed_url_unique')
   })
 })
 
