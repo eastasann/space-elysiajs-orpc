@@ -79,6 +79,7 @@ jobs:
       issues: write # lifecycle labels on the linked issue
       checks: write # publish loop/risk-gate and loop/review-gate
       actions: read # read the triggering CI run
+      id-token: write # the review agent's action mints its App token via OIDC
     steps:
       - name: Resolve the pull request
         id: resolve
