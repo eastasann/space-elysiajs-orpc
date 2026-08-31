@@ -107,6 +107,15 @@ describe('B — no Claude authentication', () => {
     }
   })
 
+  // Bun's default 5s is too tight for what this actually does: it builds a real
+  // git repository on disk and then runs `preflight`, which probes for `gh` and
+  // `claude` by spawning them. On CI those binaries are absent, so each probe
+  // pays a full PATH lookup and spawn failure, on a runner already hosting
+  // Postgres and Valkey. It timed out at 5001ms on two consecutive commits that
+  // touched none of this code.
+  //
+  // The assertion is unchanged — the budget is, because the work is genuinely
+  // variable and a timeout is not a finding.
   test('preflight refuses before any issue is claimed', async () => {
     const sandbox = await createSandbox()
     try {
@@ -120,7 +129,7 @@ describe('B — no Claude authentication', () => {
     } finally {
       await sandbox.cleanup()
     }
-  })
+  }, 30_000)
 
   test('an ANTHROPIC_API_KEY in the environment is reported, not silently used', async () => {
     const availability = await probeClaude({
