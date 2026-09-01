@@ -91,6 +91,7 @@ function isPrivateIPv4(address: string): boolean {
   if (a === 0) return true // "this network" / unspecified
   if (a === 127) return true // loopback
   if (a === 10) return true // private
+  if (a === 100 && b >= 64 && b <= 127) return true // shared/carrier-grade NAT, RFC 6598
   if (a === 169 && b === 254) return true // link-local, incl. cloud metadata (169.254.169.254)
   if (a === 172 && b >= 16 && b <= 31) return true // private
   if (a === 192 && b === 168) return true // private

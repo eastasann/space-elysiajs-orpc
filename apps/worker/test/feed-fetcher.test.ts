@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import http from 'node:http'
 import type { FetchFeedOptions } from '../src/lib/feed-fetcher.ts'
 import { FeedFetchError, fetchFeed as fetchFeedImpl } from '../src/lib/feed-fetcher.ts'
 
@@ -385,6 +386,19 @@ describe('fetchFeed', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('refuses a shared/carrier-grade NAT address (100.64.0.0/10)', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://100.64.0.5/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
   it('refuses a hostname that resolves to a private address', async () => {
     const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
 
@@ -473,5 +487,55 @@ describe('fetchFeed', () => {
     await fetchFeed({ url: 'https://example.com/start.xml', fetchImpl })
 
     expect(cancelled).toBe(true)
+  })
+})
+
+/**
+ * `fetchFeed` pins the connection to the resolved address and restores the
+ * original hostname by setting a `Host` header and `tls.serverName` on the
+ * request passed to `fetchImpl` (see `assertSafeUrl` in
+ * `../src/lib/feed-fetcher.ts`). Every test above fakes `fetchImpl`, so it
+ * can only assert on the object handed to it — it cannot tell whether the
+ * real runtime actually sends that `Host` header on the wire rather than
+ * silently dropping it, which the Fetch spec allows for a small set of
+ * "forbidden" header names that includes `Host`.
+ *
+ * `fetchFeed` itself cannot be exercised against a real local server here:
+ * `assertSafeUrl` correctly refuses to connect to loopback/private
+ * addresses, and any server this test process can stand up is reachable
+ * only on one of those. So this pins the narrower, real assumption
+ * `fetchFeed`'s pinning depends on — that Bun's global `fetch` honors a
+ * `Host` header override when the request URL is a bare IP literal — against
+ * the real, unmocked `fetch`, with no `fetchImpl` fake involved.
+ *
+ * This was also verified manually against a real CDN-fronted HTTPS origin
+ * (resolving `example.com` to its own IP and fetching that IP directly with
+ * `Host` and `tls.serverName` overridden to `example.com`): the request
+ * returned the correct site, while the same request without the overrides
+ * failed outright. That confirms `tls.serverName` is honored for SNI and
+ * certificate validation the same way `Host` is honored below.
+ */
+describe('the real fetch honors a Host header override for an IP-literal request', () => {
+  it('delivers the overridden Host header to the origin server instead of dropping it', async () => {
+    let seenHost: string | undefined
+    const server = http.createServer((req, res) => {
+      seenHost = req.headers.host
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (typeof address !== 'object' || address === null) throw new Error('server did not bind')
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/`, {
+        headers: { Host: 'origin.internal.test' },
+      })
+      await response.text()
+
+      expect(seenHost).toBe('origin.internal.test')
+    } finally {
+      server.close()
+    }
   })
 })
