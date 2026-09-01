@@ -42,6 +42,9 @@ function fakeFetch(impl: () => Promise<Response> | Response) {
   return (async (..._args: Parameters<typeof fetch>) => impl()) as typeof fetch
 }
 
+/** A public address, so tests never touch real DNS. */
+const resolveHostname = () => Promise.resolve(['93.184.216.34'])
+
 const context = (logger: ReturnType<typeof collectingLogger>['logger']) => ({
   logger,
   instanceId: 'worker-test',
@@ -59,6 +62,7 @@ describe('createSourcesFetchHandler', () => {
     const { logger, records } = collectingLogger()
     const handler = createSourcesFetchHandler({
       repository,
+      resolveHostname,
       fetchImpl: fakeFetch(
         () =>
           new Response('<rss></rss>', {
@@ -90,6 +94,7 @@ describe('createSourcesFetchHandler', () => {
     const { logger, records } = collectingLogger()
     const handler = createSourcesFetchHandler({
       repository,
+      resolveHostname,
       fetchImpl: fakeFetch(() => new Response(null, { status: 304 })),
     })
 
@@ -112,6 +117,7 @@ describe('createSourcesFetchHandler', () => {
     const { logger, records } = collectingLogger()
     const handler = createSourcesFetchHandler({
       repository,
+      resolveHostname,
       fetchImpl: fakeFetch(() => new Response('gone', { status: 404 })),
     })
 
@@ -135,6 +141,7 @@ describe('createSourcesFetchHandler', () => {
     const { logger, records } = collectingLogger()
     const handler = createSourcesFetchHandler({
       repository,
+      resolveHostname,
       fetchImpl: fakeFetch(() => new Response('oops', { status: 503 })),
     })
 
@@ -153,6 +160,7 @@ describe('createSourcesFetchHandler', () => {
     let fetchCalled = false
     const handler = createSourcesFetchHandler({
       repository,
+      resolveHostname,
       fetchImpl: fakeFetch(() => {
         fetchCalled = true
         return new Response('', { status: 200 })

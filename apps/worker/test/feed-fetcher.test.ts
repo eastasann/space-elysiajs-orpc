@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { FeedFetchError, fetchFeed } from '../src/lib/feed-fetcher.ts'
+import type { FetchFeedOptions } from '../src/lib/feed-fetcher.ts'
+import { FeedFetchError, fetchFeed as fetchFeedImpl } from '../src/lib/feed-fetcher.ts'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
 
@@ -10,6 +11,17 @@ function fakeFetch(impl: (url: string, init?: RequestInit) => Promise<Response> 
     return impl(String(input), init)
   }) as typeof fetch
   return { fetchImpl, calls }
+}
+
+/** A public address `example.com` may resolve to, for tests that don't care about DNS. */
+const PUBLIC_ADDRESS = '93.184.216.34'
+
+/** Wraps `fetchFeed` with a DNS resolver that returns a public address by default, so tests never touch real DNS. */
+function fetchFeed(options: FetchFeedOptions) {
+  return fetchFeedImpl({
+    resolveHostname: () => Promise.resolve([PUBLIC_ADDRESS]),
+    ...options,
+  })
 }
 
 describe('fetchFeed', () => {
@@ -251,5 +263,135 @@ describe('fetchFeed', () => {
 
     expect(error).toBeInstanceOf(FeedFetchError)
     expect((error as FeedFetchError).reason).toBe('invalid-scheme')
+  })
+
+  it('refuses a loopback address without making a request', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://127.0.0.1/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a link-local address, including the cloud metadata endpoint', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://169.254.169.254/latest/meta-data/',
+      fetchImpl,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a private-range address without making a request', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://10.0.0.5/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a hostname that resolves to a private address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://internal.example/feed.xml',
+      fetchImpl,
+      resolveHostname: () => Promise.resolve(['192.168.1.10']),
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a redirect from a public url to a private address', async () => {
+    const { fetchImpl, calls } = fakeFetch((url) => {
+      if (url === 'https://example.com/start.xml') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+        })
+      }
+      return new Response('unreachable', { status: 200 })
+    })
+
+    const error = await fetchFeed({ url: 'https://example.com/start.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('allows a normal public feed through unaffected', async () => {
+    const { fetchImpl } = fakeFetch(
+      () => new Response('<rss></rss>', { status: 200, headers: { 'content-type': 'text/xml' } }),
+    )
+
+    const result = await fetchFeed({ url: 'https://example.com/feed.xml', fetchImpl })
+
+    expect(result).toEqual({
+      status: 'fetched',
+      body: '<rss></rss>',
+      contentType: 'text/xml',
+      etag: null,
+      lastModified: null,
+    })
+  })
+
+  it('shares one deadline across every redirect hop instead of resetting it per hop', async () => {
+    const { fetchImpl, calls } = fakeFetch((url) => {
+      if (url === 'https://example.com/start.xml') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://example.com/next.xml' },
+        })
+      }
+      return new Response('<rss></rss>', { status: 200 })
+    })
+
+    await fetchFeed({ url: 'https://example.com/start.xml', fetchImpl })
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.init?.signal).toBe(calls[1]?.init?.signal)
+  })
+
+  it('cancels a superseded redirect response body before following the next hop', async () => {
+    let cancelled = false
+    const redirectBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    const { fetchImpl } = fakeFetch((url) => {
+      if (url === 'https://example.com/start.xml') {
+        return new Response(redirectBody, {
+          status: 302,
+          headers: { location: 'https://example.com/next.xml' },
+        })
+      }
+      return new Response('<rss></rss>', { status: 200 })
+    })
+
+    await fetchFeed({ url: 'https://example.com/start.xml', fetchImpl })
+
+    expect(cancelled).toBe(true)
   })
 })
