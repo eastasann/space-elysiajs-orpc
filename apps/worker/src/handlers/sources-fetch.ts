@@ -7,6 +7,8 @@ export interface SourcesFetchHandlerOptions {
   repository: SourcesRepository
   /** Injection point for tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch
+  /** Injection point for tests; defaults to a real DNS lookup. */
+  resolveHostname?: (hostname: string) => Promise<string[]>
 }
 
 /**
@@ -19,7 +21,7 @@ export interface SourcesFetchHandlerOptions {
 export function createSourcesFetchHandler(
   options: SourcesFetchHandlerOptions,
 ): JobHandler<SourcesFetchPayload> {
-  const { repository, fetchImpl } = options
+  const { repository, fetchImpl, resolveHostname } = options
 
   return {
     definition: sourcesFetchJob,
@@ -38,6 +40,7 @@ export function createSourcesFetchHandler(
           etag: source.etag,
           lastModified: source.lastModified,
           fetchImpl,
+          resolveHostname,
         })
 
         if (result.status === 'not-modified') {
