@@ -124,6 +124,42 @@ function isPrivateAddress(address: string): boolean {
   return false
 }
 
+/** Races `resolveHostname` against `signal`, so a slow or hanging DNS server cannot outlast the request's own deadline. */
+function resolveWithDeadline(
+  resolveHostname: (hostname: string) => Promise<string[]>,
+  hostname: string,
+  signal: AbortSignal,
+): Promise<string[]> {
+  if (signal.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    resolveHostname(hostname)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+/**
+ * A url that has passed `assertSafeUrl`: `logicalUrl` is what redirects are
+ * resolved against and what appears in error messages; `connectUrl` is what
+ * `fetchImpl` is actually called with.
+ *
+ * For a non-IP hostname these differ: `connectUrl` has the hostname replaced
+ * by the address that was just resolved and checked, so `fetchImpl` connects
+ * to the address this function validated instead of re-resolving the
+ * hostname itself — a second lookup could answer differently from the first
+ * (DNS rebinding) in the gap between the check and the connection it guards.
+ * `hostHeader` and `tlsServerName` carry the original hostname through so the
+ * request is still addressed, and its certificate verified, by name.
+ */
+interface SafeUrl {
+  logicalUrl: string
+  connectUrl: string
+  hostHeader: string
+  tlsServerName: string | undefined
+}
+
 /**
  * Parses and validates a feed url: rejects non-`http(s)` schemes, then
  * resolves the hostname and rejects any address that is loopback,
@@ -134,7 +170,9 @@ function isPrivateAddress(address: string): boolean {
 async function assertSafeUrl(
   raw: string,
   resolveHostname: (hostname: string) => Promise<string[]>,
-): Promise<string> {
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<SafeUrl> {
   let parsed: URL
   try {
     parsed = new URL(raw)
@@ -151,14 +189,22 @@ async function assertSafeUrl(
   }
 
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '')
+  const isLiteralIp = net.isIP(hostname) !== 0
 
   let addresses: string[]
-  if (net.isIP(hostname) !== 0) {
+  if (isLiteralIp) {
     addresses = [hostname]
   } else {
     try {
-      addresses = await resolveHostname(hostname)
+      addresses = await resolveWithDeadline(resolveHostname, hostname, signal)
     } catch (error) {
+      if (signal.aborted) {
+        throw new FeedFetchError(
+          'timeout',
+          true,
+          `resolving "${hostname}" timed out after ${timeoutMs}ms`,
+        )
+      }
       const message = error instanceof Error ? error.message : String(error)
       throw new FeedFetchError('network', true, `could not resolve "${hostname}": ${message}`)
     }
@@ -177,7 +223,20 @@ async function assertSafeUrl(
     )
   }
 
-  return parsed.toString()
+  const logicalUrl = parsed.toString()
+  if (isLiteralIp) {
+    return { logicalUrl, connectUrl: logicalUrl, hostHeader: parsed.host, tlsServerName: undefined }
+  }
+
+  const pinnedAddress = addresses[0] as string
+  const connect = new URL(logicalUrl)
+  connect.hostname = net.isIP(pinnedAddress) === 6 ? `[${pinnedAddress}]` : pinnedAddress
+  return {
+    logicalUrl,
+    connectUrl: connect.toString(),
+    hostHeader: parsed.host,
+    tlsServerName: parsed.protocol === 'https:' ? hostname : undefined,
+  }
 }
 
 /** Reads the body up to `maxBytes`, aborting the stream rather than buffering past it. */
@@ -242,33 +301,39 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
   }, timeoutMs)
 
   try {
-    let currentUrl = await assertSafeUrl(options.url, resolveHostname)
+    let current = await assertSafeUrl(options.url, resolveHostname, controller.signal, timeoutMs)
 
     for (let redirectCount = 0; ; redirectCount++) {
       const headers: Record<string, string> = {
         'User-Agent': userAgent,
         Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+        Host: current.hostHeader,
       }
       if (etag) headers['If-None-Match'] = etag
       if (lastModified) headers['If-Modified-Since'] = lastModified
 
       let response: Response
       try {
-        response = await fetchImpl(currentUrl, {
+        response = await fetchImpl(current.connectUrl, {
           signal: controller.signal,
           redirect: 'manual',
           headers,
+          ...(current.tlsServerName ? { tls: { serverName: current.tlsServerName } } : {}),
         })
       } catch (error) {
         if (timedOut) {
           throw new FeedFetchError(
             'timeout',
             true,
-            `request to "${currentUrl}" timed out after ${timeoutMs}ms`,
+            `request to "${current.logicalUrl}" timed out after ${timeoutMs}ms`,
           )
         }
         const message = error instanceof Error ? error.message : String(error)
-        throw new FeedFetchError('network', true, `request to "${currentUrl}" failed: ${message}`)
+        throw new FeedFetchError(
+          'network',
+          true,
+          `request to "${current.logicalUrl}" failed: ${message}`,
+        )
       }
 
       if (response.status === 304) return { status: 'not-modified' }
@@ -283,7 +348,7 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
           throw new FeedFetchError(
             'http-error',
             false,
-            `redirect from "${currentUrl}" carried no Location header (status ${response.status})`,
+            `redirect from "${current.logicalUrl}" carried no Location header (status ${response.status})`,
             response.status,
           )
         }
@@ -295,7 +360,12 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
             response.status,
           )
         }
-        currentUrl = await assertSafeUrl(new URL(location, currentUrl).toString(), resolveHostname)
+        current = await assertSafeUrl(
+          new URL(location, current.logicalUrl).toString(),
+          resolveHostname,
+          controller.signal,
+          timeoutMs,
+        )
         continue
       }
 
@@ -303,7 +373,7 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
         throw new FeedFetchError(
           'http-error',
           false,
-          `feed responded ${response.status} for "${currentUrl}"`,
+          `feed responded ${response.status} for "${current.logicalUrl}"`,
           response.status,
         )
       }
@@ -312,7 +382,7 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
         throw new FeedFetchError(
           'http-error',
           true,
-          `feed responded ${response.status} for "${currentUrl}"`,
+          `feed responded ${response.status} for "${current.logicalUrl}"`,
           response.status,
         )
       }
@@ -321,7 +391,7 @@ export async function fetchFeed(options: FetchFeedOptions): Promise<FetchFeedRes
         throw new FeedFetchError(
           'http-error',
           false,
-          `feed responded ${response.status} for "${currentUrl}"`,
+          `feed responded ${response.status} for "${current.logicalUrl}"`,
           response.status,
         )
       }

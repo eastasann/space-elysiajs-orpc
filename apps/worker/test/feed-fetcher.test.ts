@@ -16,6 +16,17 @@ function fakeFetch(impl: (url: string, init?: RequestInit) => Promise<Response> 
 /** A public address `example.com` may resolve to, for tests that don't care about DNS. */
 const PUBLIC_ADDRESS = '93.184.216.34'
 
+/**
+ * `fetchFeed` now connects to the resolved-and-checked address rather than
+ * letting `fetchImpl` re-resolve the hostname (that second, independent
+ * lookup is the DNS-rebinding gap it closes), so a fake `fetchImpl` sees
+ * `https://93.184.216.34/...` rather than `https://example.com/...`. Tests
+ * that need to key off the logical request match on `pathname` instead.
+ */
+function pathnameOf(url: string): string {
+  return new URL(url).pathname
+}
+
 /** Wraps `fetchFeed` with a DNS resolver that returns a public address by default, so tests never touch real DNS. */
 function fetchFeed(options: FetchFeedOptions) {
   return fetchFeedImpl({
@@ -52,6 +63,31 @@ describe('fetchFeed', () => {
     })
   })
 
+  it('connects to the resolved address instead of the hostname, and carries the hostname through as Host and TLS servername', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('<rss></rss>', { status: 200 }))
+
+    await fetchFeed({ url: 'https://example.com/feed.xml', fetchImpl })
+
+    // The connection targets the address that assertSafeUrl already checked
+    // rather than a hostname fetchImpl would resolve independently — that
+    // second, independent resolution is the DNS-rebinding gap being closed.
+    expect(calls[0]?.url).toBe(`https://${PUBLIC_ADDRESS}/feed.xml`)
+    expect(calls[0]?.init?.headers).toMatchObject({ Host: 'example.com' })
+    expect((calls[0]?.init as { tls?: { serverName?: string } } | undefined)?.tls).toEqual({
+      serverName: 'example.com',
+    })
+  })
+
+  it('does not pin or add a TLS servername when the url is already a literal address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('<rss></rss>', { status: 200 }))
+
+    await fetchFeedImpl({ url: 'http://93.184.216.34/feed.xml', fetchImpl })
+
+    expect(calls[0]?.url).toBe('http://93.184.216.34/feed.xml')
+    expect(calls[0]?.init?.headers).toMatchObject({ Host: '93.184.216.34' })
+    expect((calls[0]?.init as { tls?: unknown } | undefined)?.tls).toBeUndefined()
+  })
+
   it('sends stored validators as conditional request headers', async () => {
     const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 304 }))
 
@@ -86,6 +122,47 @@ describe('fetchFeed', () => {
     expect(error).toBeInstanceOf(FeedFetchError)
     expect((error as FeedFetchError).reason).toBe('timeout')
     expect((error as FeedFetchError).retryable).toBe(true)
+  })
+
+  it('treats a hanging DNS resolution as a timeout instead of waiting on it forever', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('<rss></rss>', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'https://example.com/feed.xml',
+      timeoutMs: 20,
+      fetchImpl,
+      resolveHostname: () => new Promise(() => {}),
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('timeout')
+    expect((error as FeedFetchError).retryable).toBe(true)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('treats a hanging DNS resolution on a redirect hop as a timeout bound by the same deadline', async () => {
+    const { fetchImpl, calls } = fakeFetch((url) => {
+      if (pathnameOf(url) === '/start.xml') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://redirect-target.example/next.xml' },
+        })
+      }
+      return new Response('<rss></rss>', { status: 200 })
+    })
+
+    const error = await fetchFeed({
+      url: 'https://example.com/start.xml',
+      timeoutMs: 20,
+      fetchImpl,
+      resolveHostname: (hostname) =>
+        hostname === 'example.com' ? Promise.resolve([PUBLIC_ADDRESS]) : new Promise(() => {}),
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('timeout')
+    expect((error as FeedFetchError).retryable).toBe(true)
+    expect(calls).toHaveLength(1)
   })
 
   it('treats a connection error as retryable', async () => {
@@ -177,7 +254,7 @@ describe('fetchFeed', () => {
 
   it('follows a redirect up to the configured depth', async () => {
     const { fetchImpl, calls } = fakeFetch((url) => {
-      if (url === 'https://example.com/old.xml') {
+      if (pathnameOf(url) === '/old.xml') {
         return new Response(null, {
           status: 301,
           headers: { location: 'https://example.com/new.xml' },
@@ -202,9 +279,12 @@ describe('fetchFeed', () => {
       etag: null,
       lastModified: null,
     })
+    // Both hops connect to the resolved address; the hostname each hop was
+    // logically addressed to is what pathnameOf/the Host header carry.
+    expect(calls.map((call) => pathnameOf(call.url))).toEqual(['/old.xml', '/new.xml'])
     expect(calls.map((call) => call.url)).toEqual([
-      'https://example.com/old.xml',
-      'https://example.com/new.xml',
+      `https://${PUBLIC_ADDRESS}/old.xml`,
+      `https://${PUBLIC_ADDRESS}/new.xml`,
     ])
   })
 
@@ -321,7 +401,7 @@ describe('fetchFeed', () => {
 
   it('refuses a redirect from a public url to a private address', async () => {
     const { fetchImpl, calls } = fakeFetch((url) => {
-      if (url === 'https://example.com/start.xml') {
+      if (pathnameOf(url) === '/start.xml') {
         return new Response(null, {
           status: 302,
           headers: { location: 'http://169.254.169.254/latest/meta-data/' },
@@ -358,7 +438,7 @@ describe('fetchFeed', () => {
 
   it('shares one deadline across every redirect hop instead of resetting it per hop', async () => {
     const { fetchImpl, calls } = fakeFetch((url) => {
-      if (url === 'https://example.com/start.xml') {
+      if (pathnameOf(url) === '/start.xml') {
         return new Response(null, {
           status: 302,
           headers: { location: 'https://example.com/next.xml' },
@@ -381,7 +461,7 @@ describe('fetchFeed', () => {
       },
     })
     const { fetchImpl } = fakeFetch((url) => {
-      if (url === 'https://example.com/start.xml') {
+      if (pathnameOf(url) === '/start.xml') {
         return new Response(redirectBody, {
           status: 302,
           headers: { location: 'https://example.com/next.xml' },
