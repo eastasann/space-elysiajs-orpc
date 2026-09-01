@@ -98,23 +98,97 @@ function isPrivateIPv4(address: string): boolean {
   return false
 }
 
-/** Covers the address forms a resolver or a `new URL(...)` can hand back: plain IPv4, IPv4-mapped IPv6, and IPv6 loopback/link-local/unique-local. */
-function isPrivateIPv6(address: string): boolean {
-  const normalized = address.toLowerCase()
-  if (normalized === '::1' || normalized === '::') return true
-
-  const mappedV4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-  if (mappedV4) return isPrivateIPv4(mappedV4[1] as string)
-
-  const mappedHex = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-  if (mappedHex) {
-    const hi = Number.parseInt(mappedHex[1] as string, 16)
-    const lo = Number.parseInt(mappedHex[2] as string, 16)
-    return isPrivateIPv4(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`)
+/**
+ * Expands any valid textual IPv6 form — `::` compression and a dotted-quad
+ * tail alike — to its 8 16-bit groups, or `null` if the address does not
+ * parse. Needed because an embedded IPv4 address can appear at any of several
+ * bit offsets (mapped, 6to4, NAT64, ...), which a single regex per form
+ * cannot cover once `::` compression is involved.
+ */
+function expandIPv6Groups(address: string): number[] | null {
+  let text = address
+  const dottedTail = text.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (dottedTail) {
+    const tail = dottedTail[1] as string
+    const octets = tail.split('.').map(Number)
+    if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null
+    const [a, b, c, d] = octets as [number, number, number, number]
+    const hi = ((a << 8) | b).toString(16)
+    const lo = ((c << 8) | d).toString(16)
+    text = `${text.slice(0, text.length - tail.length)}${hi}:${lo}`
   }
 
-  if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true // link-local, fe80::/10
-  if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true // unique local, fc00::/7
+  const doubleColon = text.indexOf('::')
+  const headText = doubleColon === -1 ? text : text.slice(0, doubleColon)
+  const tailText = doubleColon === -1 ? '' : text.slice(doubleColon + 2)
+  if (tailText.includes('::')) return null
+
+  const head = headText.length > 0 ? headText.split(':') : []
+  const tail = tailText.length > 0 ? tailText.split(':') : []
+  const groupCount = head.length + tail.length
+  if (doubleColon === -1 ? groupCount !== 8 : groupCount >= 8) return null
+
+  const missing = doubleColon === -1 ? 0 : 8 - groupCount
+  const hexGroups = [...head, ...new Array(missing).fill('0'), ...tail]
+  if (hexGroups.length !== 8) return null
+
+  const groups = hexGroups.map((group) => Number.parseInt(group, 16))
+  return groups.some((group) => Number.isNaN(group) || group < 0 || group > 0xffff) ? null : groups
+}
+
+/** Builds a dotted-decimal address from two 16-bit groups — the embedded IPv4 in a mapped, 6to4 or NAT64 address. */
+function ipv4FromGroups(hi: number, lo: number): string {
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
+}
+
+/**
+ * Covers the address forms a resolver or a `new URL(...)` can hand back:
+ * loopback and unspecified, link-local (`fe80::/10`), unique-local
+ * (`fc00::/7`), and every common form that embeds an IPv4 address — checked
+ * against `isPrivateIPv4` in turn — IPv4-mapped (`::ffff:0:0/96`),
+ * IPv4-compatible (`::/96`, deprecated), 6to4 (`2002::/16`) and the NAT64
+ * well-known prefix (`64:ff9b::/96`).
+ */
+function isPrivateIPv6(address: string): boolean {
+  const groups = expandIPv6Groups(address.toLowerCase())
+  if (!groups) return false
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ]
+
+  if (groups.every((group) => group === 0)) return true // :: (unspecified)
+  if (
+    g0 === 0 &&
+    g1 === 0 &&
+    g2 === 0 &&
+    g3 === 0 &&
+    g4 === 0 &&
+    g5 === 0 &&
+    g6 === 0 &&
+    g7 === 1
+  ) {
+    return true // ::1 (loopback)
+  }
+  if ((g0 & 0xffc0) === 0xfe80) return true // link-local, fe80::/10
+  if ((g0 & 0xfe00) === 0xfc00) return true // unique local, fc00::/7
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+    return isPrivateIPv4(ipv4FromGroups(g6, g7)) // IPv4-mapped, ::ffff:0:0/96
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateIPv4(ipv4FromGroups(g6, g7)) // IPv4-compatible (deprecated), ::/96
+  }
+  if (g0 === 0x2002) return isPrivateIPv4(ipv4FromGroups(g1, g2)) // 6to4, 2002::/16
+  if (g0 === 0x0064 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateIPv4(ipv4FromGroups(g6, g7)) // NAT64 well-known prefix, 64:ff9b::/96
+  }
+
   return false
 }
 

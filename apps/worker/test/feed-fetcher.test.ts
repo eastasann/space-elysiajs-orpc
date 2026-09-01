@@ -399,6 +399,87 @@ describe('fetchFeed', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('refuses an IPv6 loopback address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://[::1]/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses an IPv6 link-local address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://[fe80::1]/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses an IPv4-mapped IPv6 address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://[::ffff:127.0.0.1]/feed.xml',
+      fetchImpl,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a deprecated IPv4-compatible IPv6 address (::/96) embedding a private address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({ url: 'http://[::127.0.0.1]/feed.xml', fetchImpl }).catch(
+      (caught) => caught,
+    )
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a 6to4 address (2002::/16) embedding a private address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://[2002:c0a8:0101::]/feed.xml',
+      fetchImpl,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a NAT64 well-known-prefix address (64:ff9b::/96) embedding the cloud metadata address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://[64:ff9b::a9fe:a9fe]/feed.xml',
+      fetchImpl,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect((error as FeedFetchError).retryable).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
   it('refuses a hostname that resolves to a private address', async () => {
     const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
 
@@ -406,6 +487,20 @@ describe('fetchFeed', () => {
       url: 'http://internal.example/feed.xml',
       fetchImpl,
       resolveHostname: () => Promise.resolve(['192.168.1.10']),
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(FeedFetchError)
+    expect((error as FeedFetchError).reason).toBe('private-address')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a hostname that resolves to a private IPv6 (unique-local) address', async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response('unreachable', { status: 200 }))
+
+    const error = await fetchFeedImpl({
+      url: 'http://internal.example/feed.xml',
+      fetchImpl,
+      resolveHostname: () => Promise.resolve(['fd00::1']),
     }).catch((caught) => caught)
 
     expect(error).toBeInstanceOf(FeedFetchError)
